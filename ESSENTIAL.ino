@@ -6,16 +6,15 @@
 
 struct IrSensor
 {
-  const char *name;
   int irLedPin;         // IR LED transmitter
   int receiverPin;      // IR receiver (reads LOW when it sees a reflection)
-  int indicatorLedPin;  // Visible LED, lit when a wall is detected
+  int indicatorLedPin;  // Visible LED used to display the scenario code
   long detectFrequency; // Frequency used for wall detection
 };
 
-IrSensor leftSensor   = { "LEFT",   10, 11, A2, 39000 };
-IrSensor middleSensor = { "MIDDLE",  6,  7, A1, 39000 };
-IrSensor rightSensor  = { "RIGHT",   2,  3, A0, 38000 };
+IrSensor leftSensor   = { 10, 11, A2, 39000 };
+IrSensor middleSensor = {  6,  7, A1, 39000 };
+IrSensor rightSensor  = {  2,  3, A0, 38000 };
 
 // Frequency sweep used to estimate distance
 const long DISTANCE_FREQ_START = 38000;
@@ -23,11 +22,33 @@ const long DISTANCE_FREQ_END   = 42000;
 const long DISTANCE_FREQ_STEP  = 1000;
 
 // ==========================================
-// LED ENCODING MAP
+// DISTANCE THRESHOLDS (CALIBRATE THESE)
+// irDistance() zones: 0 = very close ... 5 = nothing seen
 // ==========================================
 
-// 3-bit binary patterns for 0-7, ordered { LEFT, MIDDLE, RIGHT }
-// e.g. LED_CODES[1] = { LOW, LOW, HIGH }, LED_CODES[2] = { LOW, HIGH, LOW }
+// Code 1: front reading at/above this = no object within 10 cm
+const int FRONT_CLEAR_MIN_ZONE = 3;
+
+// Codes 2 & 3: front reading within (x, y)
+const int TURN_FRONT_MIN_ZONE = 0;
+const int TURN_FRONT_MAX_ZONE = 2;
+
+// Code 2: left reading within (x, y) / Code 3: right reading within (x, y)
+const int TURN_SIDE_MIN_ZONE = 0;
+const int TURN_SIDE_MAX_ZONE = 4;
+
+// Code 4: front, left and right readings all within (x, y)
+const int DEAD_END_MIN_ZONE = 0;
+const int DEAD_END_MAX_ZONE = 2;
+
+// Code 5: front reading for "no object in front"
+const int NO_OBJECT_ZONE = 5;
+
+// ==========================================
+// LED ENCODING MAP
+// 3-bit binary patterns for 0-7, right is the least significant bit (LSB)
+// ==========================================
+
 const int LED_CODE_COUNT = 8;
 const int LED_CODES[LED_CODE_COUNT][3] =
 {
@@ -41,8 +62,16 @@ const int LED_CODES[LED_CODE_COUNT][3] =
   { HIGH, HIGH, HIGH }  // 7
 };
 
+// Scenario codes shown on the LEDs { Left A2, Mid A1, Right A0 }
+const int SCENARIO_UNKNOWN    = 0; // OFF OFF OFF
+const int SCENARIO_CORRIDOR   = 1; // OFF OFF ON
+const int SCENARIO_RIGHT_TURN = 2; // OFF ON  OFF
+const int SCENARIO_LEFT_TURN  = 3; // OFF ON  ON
+const int SCENARIO_DEAD_END   = 4; // ON  OFF OFF
+const int SCENARIO_CLOSE_LEFT = 5; // ON  OFF ON
+
 // ==========================================
-// CALIBRATED SERVO VALUES
+// Servos Callibration Values
 // ==========================================
 
 const int LEFT_SERVO_PIN  = 13;
@@ -53,26 +82,45 @@ const int LEFT_STOP  = 1500;
 const int RIGHT_STOP = 1493;
 
 // Straight forward
-// Drifting right -> slow the left wheel (lower LEFT_FORWARD) or speed up the right (lower RIGHT_FORWARD)
-// Drifting left  -> do the opposite
 const int LEFT_FORWARD  = 1570;
 const int RIGHT_FORWARD = 1428;
+
+// Centring: how much to slow one wheel to steer back to the middle of the corridor
+const int STEER_AMOUNT = 15;
 
 // 90 degree turns (both wheels driven the same way to spin in place)
 const int LEFT_TURN_SPEED  = 1400;
 const int RIGHT_TURN_SPEED = 1600;
 const int TURN_TIME        = 580;
 
-// 180 degree turn (starting point: twice the 90 degree time, tune if needed)
+// 180 degree turn
 const int TURN_180_TIME    = 2 * TURN_TIME;
+
+// Code 5: slight turn used to move back to the middle (about 45 degrees)
+const int NUDGE_TURN_TIME  = TURN_TIME / 2;
+
+// ==========================================
+// FORWARD DISTANCES (CALIBRATE FORWARD_MS_PER_CM)
+// Drive forward for 2000 ms, measure the distance, then set this to 2000 / cm travelled.
+// ==========================================
+
+const int FORWARD_MS_PER_CM   = 75;
+const int CORRIDOR_FORWARD_CM = 5; // Code 1: move 5 cm
+const int NUDGE_FORWARD_CM    = 3; // Code 5: distance to move towards the middle
 
 // Timing
 const int STARTUP_DELAY  = 5000;
 const int SETTLE_DELAY   = 200;
-const int LOOP_DELAY     = 50;
 
 Servo servoLeft;
 Servo servoRight;
+
+struct Readings
+{
+  int zoneLeft;
+  int zoneMiddle;
+  int zoneRight;
+};
 
 // ==========================================
 // SETUP
@@ -87,8 +135,6 @@ void setup()
   servoLeft.attach(LEFT_SERVO_PIN);
   servoRight.attach(RIGHT_SERVO_PIN);
 
-  Serial.begin(9600);
-
   // Keep robot stopped, then wait the required 5 seconds
   stopRobot();
   delay(STARTUP_DELAY);
@@ -96,38 +142,78 @@ void setup()
 
 // ==========================================
 // MAIN LOOP
+// Reads the sensors, shows the code, then does that code's action.
 // ==========================================
 
 void loop()
 {
-  bool wallLeft   = wallDetected(leftSensor);
-  bool wallMiddle = wallDetected(middleSensor);
-  bool wallRight  = wallDetected(rightSensor);
+  int scenario = classifyScenario(readSensors());
+  showCode(scenario);
 
-  digitalWrite(leftSensor.indicatorLedPin,   wallLeft   ? HIGH : LOW);
-  digitalWrite(middleSensor.indicatorLedPin, wallMiddle ? HIGH : LOW);
-  digitalWrite(rightSensor.indicatorLedPin,  wallRight  ? HIGH : LOW);
-
-  printDistances();
-
-  if (wallMiddle)
+  switch (scenario)
   {
-    stopRobot();
-    delay(SETTLE_DELAY);
+    case SCENARIO_CORRIDOR:
+      moveForwardCm(CORRIDOR_FORWARD_CM);
+      break;
 
-    // Dead end (all 3 sensors blocked): turn around
-    if (wallLeft && wallRight)
-      turn180();
-    // Prefer an opening on the right; otherwise turn left
-    else if (!wallRight)
+    case SCENARIO_RIGHT_TURN:
       turnRight90();
-    else
+      break;
+
+    case SCENARIO_LEFT_TURN:
       turnLeft90();
+      break;
+
+    case SCENARIO_DEAD_END:
+      turn180();
+      break;
+
+    case SCENARIO_CLOSE_LEFT:
+      moveAwayFromLeft();
+      break;
+
+    default: // SCENARIO_UNKNOWN: stationary, no movement
+      stopRobot();
   }
+}
 
-  moveForward();
+// ==========================================
+// SCENARIO DETECTION
+// ==========================================
 
-  delay(LOOP_DELAY);
+bool inRange(int value, int minValue, int maxValue)
+{
+  return value >= minValue && value <= maxValue;
+}
+
+int classifyScenario(const Readings &r)
+{
+  bool frontInTurnRange = inRange(r.zoneMiddle, TURN_FRONT_MIN_ZONE, TURN_FRONT_MAX_ZONE);
+
+  // 4: Dead end - front, left and right all within (x, y)
+  if (inRange(r.zoneMiddle, DEAD_END_MIN_ZONE, DEAD_END_MAX_ZONE) &&
+      inRange(r.zoneLeft,   DEAD_END_MIN_ZONE, DEAD_END_MAX_ZONE) &&
+      inRange(r.zoneRight,  DEAD_END_MIN_ZONE, DEAD_END_MAX_ZONE))
+    return SCENARIO_DEAD_END;
+
+  // 2: Right turn - front within (x, y), left within (x, y)
+  if (frontInTurnRange && inRange(r.zoneLeft, TURN_SIDE_MIN_ZONE, TURN_SIDE_MAX_ZONE))
+    return SCENARIO_RIGHT_TURN;
+
+  // 3: Left turn - front within (x, y), right within (x, y)
+  if (frontInTurnRange && inRange(r.zoneRight, TURN_SIDE_MIN_ZONE, TURN_SIDE_MAX_ZONE))
+    return SCENARIO_LEFT_TURN;
+
+  // 1: Straight - left = right, no object within 10 cm in front
+  if (r.zoneLeft == r.zoneRight && r.zoneMiddle >= FRONT_CLEAR_MIN_ZONE)
+    return SCENARIO_CORRIDOR;
+
+  // 5: Close left - no object in front, left reading smaller than right
+  if (r.zoneMiddle == NO_OBJECT_ZONE && r.zoneLeft < r.zoneRight)
+    return SCENARIO_CLOSE_LEFT;
+
+  // 0: Anything else
+  return SCENARIO_UNKNOWN;
 }
 
 // ==========================================
@@ -150,8 +236,41 @@ void stopRobot()
   drive(LEFT_STOP, RIGHT_STOP);
 }
 
+// Drives forward one step, steering towards the corridor centre
+// when walls are visible on both sides
+void driveCentred()
+{
+  if (!wallDetected(leftSensor) || !wallDetected(rightSensor))
+  {
+    moveForward();
+    return;
+  }
+
+  int diff = irDistance(leftSensor) - irDistance(rightSensor);
+
+  if (diff > 0)      // left wall further away -> too close to the right wall -> steer left
+    drive(LEFT_FORWARD - STEER_AMOUNT, RIGHT_FORWARD);
+  else if (diff < 0) // right wall further away -> too close to the left wall -> steer right
+    drive(LEFT_FORWARD, RIGHT_FORWARD + STEER_AMOUNT);
+  else
+    moveForward();
+}
+
+// Drives a set distance, staying centred
+void moveForwardCm(int cm)
+{
+  unsigned long duration = (unsigned long)cm * FORWARD_MS_PER_CM;
+  unsigned long start = millis();
+
+  while (millis() - start < duration)
+    driveCentred();
+}
+
 void turnInPlace(int speed, int duration)
 {
+  stopRobot();
+  delay(SETTLE_DELAY);
+
   drive(speed, speed);
   delay(duration);
   stopRobot();
@@ -171,6 +290,18 @@ void turnRight90()
 void turn180()
 {
   turnInPlace(RIGHT_TURN_SPEED, TURN_180_TIME);
+}
+
+// Code 5: rotate clockwise, move towards the middle, then turn left
+// back to the starting heading
+void moveAwayFromLeft()
+{
+  turnInPlace(RIGHT_TURN_SPEED, NUDGE_TURN_TIME);
+
+  moveForward();
+  delay(NUDGE_FORWARD_CM * FORWARD_MS_PER_CM);
+
+  turnInPlace(LEFT_TURN_SPEED, NUDGE_TURN_TIME);
 }
 
 // ==========================================
@@ -227,19 +358,13 @@ int irDistance(const IrSensor &sensor)
   return distance;
 }
 
-void printDistances()
+Readings readSensors()
 {
-  Serial.print(leftSensor.name);
-  Serial.print(": ");
-  Serial.print(irDistance(leftSensor));
+  Readings r;
 
-  Serial.print(" | ");
-  Serial.print(middleSensor.name);
-  Serial.print(": ");
-  Serial.print(irDistance(middleSensor));
+  r.zoneLeft   = irDistance(leftSensor);
+  r.zoneMiddle = irDistance(middleSensor);
+  r.zoneRight  = irDistance(rightSensor);
 
-  Serial.print(" | ");
-  Serial.print(rightSensor.name);
-  Serial.print(": ");
-  Serial.println(irDistance(rightSensor));
+  return r;
 }
