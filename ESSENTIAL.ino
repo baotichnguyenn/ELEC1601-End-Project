@@ -23,6 +23,25 @@ const long DISTANCE_FREQ_END   = 42000;
 const long DISTANCE_FREQ_STEP  = 1000;
 
 // ==========================================
+// LED ENCODING MAP
+// ==========================================
+
+// 3-bit binary patterns for 0-7, ordered { LEFT, MIDDLE, RIGHT }
+// e.g. LED_CODES[1] = { LOW, LOW, HIGH }, LED_CODES[2] = { LOW, HIGH, LOW }
+const int LED_CODE_COUNT = 8;
+const int LED_CODES[LED_CODE_COUNT][3] =
+{
+  { LOW,  LOW,  LOW  }, // 0
+  { LOW,  LOW,  HIGH }, // 1
+  { LOW,  HIGH, LOW  }, // 2
+  { LOW,  HIGH, HIGH }, // 3
+  { HIGH, LOW,  LOW  }, // 4
+  { HIGH, LOW,  HIGH }, // 5
+  { HIGH, HIGH, LOW  }, // 6
+  { HIGH, HIGH, HIGH }  // 7
+};
+
+// ==========================================
 // CALIBRATED SERVO VALUES
 // ==========================================
 
@@ -34,13 +53,18 @@ const int LEFT_STOP  = 1500;
 const int RIGHT_STOP = 1493;
 
 // Straight forward
-const int LEFT_FORWARD  = 1585;
-const int RIGHT_FORWARD = 1420;
+// Drifting right -> slow the left wheel (lower LEFT_FORWARD) or speed up the right (lower RIGHT_FORWARD)
+// Drifting left  -> do the opposite
+const int LEFT_FORWARD  = 1570;
+const int RIGHT_FORWARD = 1428;
 
 // 90 degree turns (both wheels driven the same way to spin in place)
 const int LEFT_TURN_SPEED  = 1400;
 const int RIGHT_TURN_SPEED = 1600;
-const int TURN_TIME        = 590;
+const int TURN_TIME        = 580;
+
+// 180 degree turn (starting point: twice the 90 degree time, tune if needed)
+const int TURN_180_TIME    = 2 * TURN_TIME;
 
 // Timing
 const int STARTUP_DELAY  = 5000;
@@ -91,9 +115,11 @@ void loop()
     stopRobot();
     delay(SETTLE_DELAY);
 
+    // Dead end (all 3 sensors blocked): turn around
+    if (wallLeft && wallRight)
+      turn180();
     // Prefer an opening on the right; otherwise turn left
-    // (covers both "opening on the left" and "dead end")
-    if (!wallRight)
+    else if (!wallRight)
       turnRight90();
     else
       turnLeft90();
@@ -124,22 +150,42 @@ void stopRobot()
   drive(LEFT_STOP, RIGHT_STOP);
 }
 
-void turn90(int speed)
+void turnInPlace(int speed, int duration)
 {
   drive(speed, speed);
-  delay(TURN_TIME);
+  delay(duration);
   stopRobot();
   delay(SETTLE_DELAY);
 }
 
 void turnLeft90()
 {
-  turn90(LEFT_TURN_SPEED);
+  turnInPlace(LEFT_TURN_SPEED, TURN_TIME);
 }
 
 void turnRight90()
 {
-  turn90(RIGHT_TURN_SPEED);
+  turnInPlace(RIGHT_TURN_SPEED, TURN_TIME);
+}
+
+void turn180()
+{
+  turnInPlace(RIGHT_TURN_SPEED, TURN_180_TIME);
+}
+
+// ==========================================
+// LED DISPLAY
+// ==========================================
+
+// Shows a number 0-7 on the three indicator LEDs; out-of-range values are ignored
+void showCode(int code)
+{
+  if (code < 0 || code >= LED_CODE_COUNT)
+    return;
+
+  digitalWrite(leftSensor.indicatorLedPin,   LED_CODES[code][0]);
+  digitalWrite(middleSensor.indicatorLedPin, LED_CODES[code][1]);
+  digitalWrite(rightSensor.indicatorLedPin,  LED_CODES[code][2]);
 }
 
 // ==========================================
