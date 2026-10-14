@@ -35,10 +35,17 @@ The first matching condition wins:
 5. Angled-start conditions -> codes 7/8, rotate until front clears or timeout.
 6. Remaining front-blocked corners: turn towards the side with the higher
    distance estimate, with the opposite side within `TURN_SIDE_*_CM`.
-7. Front at least 10 cm and side difference at most 3 cm -> code 1, forward.
-8. Both side walls detected, front at least 10 cm, side difference over 3 cm
-   -> code 5/6, shift away from the nearer wall.
-9. Otherwise -> code 0, stop.
+7. During initial alignment, front at least 10 cm and side difference at most
+   `CENTRE_TOLERANCE_CM` -> code 1, begin normal navigation.
+8. During initial alignment only, both side walls detected, front clear and the
+   side difference over `CENTRE_TOLERANCE_CM` (6 cm) -> code 5/6, make one
+   distance-scaled shift away from the nearer wall. After that one correction,
+   codes 5/6 are disabled and normal navigation begins.
+9. After initial alignment, a clear front -> code 1. Normal forward steering
+   handles only large side differences.
+10. If a near-wall code 0/5/6/7/8 condition, or code 1 steering hard against
+    a close wall, persists for 1.5 seconds -> code 9, stuck recovery.
+11. Otherwise -> code 0, stop.
 
 At a T-junction with both branches open and front blocked, the robot chooses
 right. Side branches now trigger a turn even when the front is clear.
@@ -52,13 +59,27 @@ code 2/3 instead of 7/8. Sensors alone do not prove corridor geometry.
 
 Code 1 drives in nominal 5 cm steps. During each step it rechecks the front and
 stops early below `FRONT_CLEAR_MIN_CM`. It steers only when both side walls are
-detected and their estimates differ by more than `CENTRE_TOLERANCE_CM` (3 cm).
+detected and their estimates differ by more than `STEER_TOLERANCE_CM` (6 cm).
+This wider steering dead band prevents small or noisy sensor differences from
+causing a continuous slow curve.
 During the 750 ms opening approach, the robot drives without side steering and stops early if the front drops below `FRONT_CLEAR_MIN_CM`. It then performs the selected turn. `OPENING_FORWARD_TIME_MS` controls the approach duration. Repeated turns at the same opening are suppressed until both side walls are detected again; closely spaced openings without this reset can be missed.
 
-Codes 5/6 retain the existing timed sideways manoeuvre: turn away 45 degrees,
-move 3 cm, turn back and reverse the along-corridor component. These manoeuvres
-and corner turns do not continuously check obstacles. Calibrate clearance and
-turn timing on the physical robot.
+Codes 5/6 run only once during starting-position alignment. A side difference
+of 6 cm or less is accepted as approximately centred. For a larger difference,
+the robot turns away 45 degrees and calculates a short 1.5-4 cm diagonal move
+from the measured excess difference. It turns parallel again and reverses only
+the along-corridor component. The capped distance prevents a noisy reading from
+causing a large or repeatedly oscillating correction. These manoeuvres and
+corner turns do not continuously check obstacles. Calibrate clearance and turn
+timing on the physical robot.
+
+Code 9 handles a robot wedged against a wall or corner. It waits for a suspicious
+condition to persist for `STUCK_DETECT_TIME_MS` (1.5 seconds), reverses for
+`STUCK_REVERSE_TIME_MS` (450 ms), then turns about 45 degrees towards the side
+with the larger distance estimate. If both sides look equal, it turns right.
+The detection delay prevents a single noisy reading from triggering recovery.
+Because there are no wheel encoders, this is a sensor-based stuck heuristic; it
+cannot directly prove that the wheels have stopped moving.
 
 | Code | Meaning | LEDs: left / middle / right |
 |---|---|---|
@@ -71,6 +92,7 @@ turn timing on the physical robot.
 | 6 | Close to right wall | ON / ON / OFF |
 | 7 | Angled towards left wall | ON / ON / ON |
 | 8 | Angled towards right wall | OFF / OFF / FLASH |
+| 9 | Stuck recovery | FLASH / ON / FLASH |
 
 Use `waitMs()` inside actions to maintain flashing LEDs, and `updateLeds()` in
 custom loops. Turns use `TURN_TIME` and derived durations, rather than encoders.
@@ -100,6 +122,9 @@ and floor surface affect the timed movement accuracy.
   away from the near wall.
 - Test a dead end and a T-junction: expect code 4 and right-turn code 2.
 - Verify front detection interrupts forward movement before reaching a wall.
+- Hold the robot safely so a wheel cannot advance near a wall: after about 1.5
+  seconds in the suspicious condition, expect code 9, a short reverse and a
+  firm turn towards the more open side.
 
 Source-condition checks cover these decisions. Arduino compilation and physical
 clearance, calibration and motion testing must still be performed on the robot.

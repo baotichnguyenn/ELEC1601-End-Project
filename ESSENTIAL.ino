@@ -85,6 +85,11 @@ const int RIGHT_TURN_SPEED = 1600; // clockwise
 const int TURN_TIME        = 580;
 const unsigned long OPENING_FORWARD_TIME_MS = 760;
 
+// Scenario 9: recover after remaining trapped against a wall/corner.
+const unsigned long STUCK_DETECT_TIME_MS = 1500;
+const unsigned long STUCK_REVERSE_TIME_MS = 450;
+const int STUCK_TURN_TIME = TURN_TIME / 2;
+
 
 // 180 degree turn
 const int TURN_180_TIME    = 2 * TURN_TIME;
@@ -110,8 +115,13 @@ const int PARALLEL_MAX_TURN_TIME = TURN_TIME / 2;
 const int FRONT_CLEAR_MIN_CM = 10;
 
 
-// Codes 1, 5 & 6: left and right count as "equal" when they differ by at most this
-const int CENTRE_TOLERANCE_CM = 4;
+// Codes 1, 5 & 6: accept an approximate centre. With the default 3 cm zone
+// spacing, a two-zone difference is still close enough to start driving.
+const int CENTRE_TOLERANCE_CM = 6;
+
+// While already driving, ignore small/noisy side differences. With the default
+// 3 cm zone spacing, this requires at least a three-zone mismatch before steering.
+const int STEER_TOLERANCE_CM = 6;
 
 
 // Codes 2 & 3: front reading within (x, y)
@@ -146,13 +156,13 @@ const int PARALLEL_FRONT_MIN_CM = NO_OBJECT_MIN_CM;
 
 // LED ENCODING MAP
 // 3-bit binary patterns for 0-7, RIGHT is the least significant bit (LSB).
-// 8 does not fit in 3 bits, so it flashes the right LED instead.
+// Codes 8 and 9 use flashing patterns because they do not fit in 3 bits.
 
 
 const int FLASH = 2; // LED toggles every FLASH_INTERVAL
 
 
-const int LED_CODE_COUNT = 9;
+const int LED_CODE_COUNT = 10;
 const int LED_CODES[LED_CODE_COUNT][3] =
 {
   { LOW,  LOW,  LOW   }, // 0
@@ -163,7 +173,8 @@ const int LED_CODES[LED_CODE_COUNT][3] =
   { HIGH, LOW,  HIGH  }, // 5
   { HIGH, HIGH, LOW   }, // 6
   { HIGH, HIGH, HIGH  }, // 7
-  { LOW,  LOW,  FLASH }  // 8
+  { LOW,  LOW,  FLASH }, // 8
+  { FLASH, HIGH, FLASH } // 9: stuck recovery
 };
 
 
@@ -184,6 +195,7 @@ const int SCENARIO_CLOSE_LEFT_5   = 5; // ON  OFF ON
 const int SCENARIO_CLOSE_RIGHT_6  = 6; // ON  ON  OFF
 const int SCENARIO_ANGLED_LEFT_7  = 7; // ON  ON  ON
 const int SCENARIO_ANGLED_RIGHT_8 = 8; // OFF OFF FLASH
+const int SCENARIO_STUCK_9         = 9; // FLASH ON FLASH
 
 
 // ==========================================
@@ -195,7 +207,8 @@ const int SCENARIO_ANGLED_RIGHT_8 = 8; // OFF OFF FLASH
 const int FORWARD_MS_PER_CM   = 75;
 const int BACKWARD_MS_PER_CM  = 75;
 const int CORRIDOR_FORWARD_CM = 5; // Code 1: move 5 cm
-const int NUDGE_FORWARD_CM    = 3; // Codes 5 & 6: distance driven at NUDGE_ANGLE_DEG towards the middle
+const float NUDGE_MIN_FORWARD_CM = 1.5;
+const float NUDGE_MAX_FORWARD_CM = 4.0;
 
 
 // Timing Setup
@@ -223,6 +236,8 @@ int shownCode = SCENARIO_UNKNOWN_0;
 bool flashOn = false;
 unsigned long lastFlashToggle = 0;
 bool openingTurnArmed = true; // Rearm after both side walls are detected again.
+bool startingPositionPhase = true; // Codes 5/6 are only for initial alignment.
+unsigned long stuckCandidateSince = 0;
 
 
 // ==========================================
@@ -267,6 +282,8 @@ void loop()
   if (!readings.leftOpen && !readings.rightOpen)
     openingTurnArmed = true;
   int scenario = classifyScenario(readings);
+  if (stuckRecoveryNeeded(readings, scenario))
+    scenario = SCENARIO_STUCK_9;
   if (DEBUG_SENSORS)
   {
     Serial.print(readings.cmLeft); Serial.print(' ');
@@ -282,11 +299,13 @@ void loop()
   switch (scenario)
   {
     case SCENARIO_CORRIDOR_1:
+      startingPositionPhase = false;
       moveForwardCm(CORRIDOR_FORWARD_CM);
       break;
 
 
     case SCENARIO_RIGHT_TURN_2:
+      startingPositionPhase = false;
       if (readings.rightOpen)
       {
         advanceToOpening();
@@ -297,6 +316,7 @@ void loop()
 
 
     case SCENARIO_LEFT_TURN_3:
+      startingPositionPhase = false;
       if (readings.leftOpen)
       {
         advanceToOpening();
@@ -307,17 +327,22 @@ void loop()
 
 
     case SCENARIO_DEAD_END_4:
+      startingPositionPhase = false;
       turn180();
       break;
 
 
     case SCENARIO_CLOSE_LEFT_5:
-      shiftTowardsMiddle(RIGHT_TURN_SPEED, LEFT_TURN_SPEED);
+      shiftTowardsMiddle(RIGHT_TURN_SPEED, LEFT_TURN_SPEED,
+                         abs(readings.cmLeft - readings.cmRight));
+      startingPositionPhase = false;
       break;
 
 
     case SCENARIO_CLOSE_RIGHT_6:
-      shiftTowardsMiddle(LEFT_TURN_SPEED, RIGHT_TURN_SPEED);
+      shiftTowardsMiddle(LEFT_TURN_SPEED, RIGHT_TURN_SPEED,
+                         abs(readings.cmLeft - readings.cmRight));
+      startingPositionPhase = false;
       break;
 
 
@@ -330,6 +355,11 @@ void loop()
       stopRobot();
       waitMs(CODE_8_SHOW_TIME);
       rotateUntilParallel(LEFT_TURN_SPEED);
+      break;
+
+
+    case SCENARIO_STUCK_9:
+      recoverFromStuck(readings);
       break;
 
 
@@ -404,25 +434,68 @@ int classifyScenario(const Readings &r)
     return SCENARIO_LEFT_TURN_3;
 
 
-  // 1: Straight - left = right, no object within 10 cm in front
-  if (abs(sideDiff) <= CENTRE_TOLERANCE_CM && r.cmMiddle >= FRONT_CLEAR_MIN_CM)
+  // 1: At startup, go straight when approximately centred. Once navigation
+  // has begun, keep moving whenever the front is clear; driveCentred() applies
+  // only a conservative correction when both walls are present.
+  if (r.cmMiddle >= FRONT_CLEAR_MIN_CM &&
+      (!startingPositionPhase || abs(sideDiff) <= CENTRE_TOLERANCE_CM))
     return SCENARIO_CORRIDOR_1;
 
 
   // 5: Close left - no object in front, left reading smaller than right
-  if (!r.leftOpen && !r.rightOpen &&
+  if (startingPositionPhase && !r.leftOpen && !r.rightOpen &&
       r.cmMiddle >= FRONT_CLEAR_MIN_CM && sideDiff < -CENTRE_TOLERANCE_CM)
     return SCENARIO_CLOSE_LEFT_5;
 
 
   // 6: Close right - no object in front, right reading smaller than left
-  if (!r.leftOpen && !r.rightOpen &&
+  if (startingPositionPhase && !r.leftOpen && !r.rightOpen &&
       r.cmMiddle >= FRONT_CLEAR_MIN_CM && sideDiff > CENTRE_TOLERANCE_CM)
     return SCENARIO_CLOSE_RIGHT_6;
 
 
   // 0: Anything else
   return SCENARIO_UNKNOWN_0;
+}
+
+
+// Scenario 9 is a recovery heuristic because the robot has no wheel encoders.
+// It activates only after a suspicious near-wall state persists long enough,
+// avoiding a recovery turn for one noisy sensor reading.
+bool stuckRecoveryNeeded(const Readings &r, int scenario)
+{
+  int sideDiff = r.cmLeft - r.cmRight;
+  bool veryCloseToSide = min(r.cmLeft, r.cmRight) <= ANGLED_NEAR_MAX_CM;
+  bool slowSteeringAgainstWall =
+    scenario == SCENARIO_CORRIDOR_1 && veryCloseToSide &&
+    abs(sideDiff) > STEER_TOLERANCE_CM;
+  bool recoveryScenario =
+    scenario == SCENARIO_UNKNOWN_0 ||
+    scenario == SCENARIO_CLOSE_LEFT_5 ||
+    scenario == SCENARIO_CLOSE_RIGHT_6 ||
+    scenario == SCENARIO_ANGLED_LEFT_7 ||
+    scenario == SCENARIO_ANGLED_RIGHT_8;
+  bool nearObstacle =
+    r.cmMiddle < FRONT_CLEAR_MIN_CM || veryCloseToSide;
+  bool suspicious = nearObstacle && (recoveryScenario || slowSteeringAgainstWall);
+
+  if (!suspicious)
+  {
+    stuckCandidateSince = 0;
+    return false;
+  }
+
+  if (stuckCandidateSince == 0)
+  {
+    stuckCandidateSince = millis();
+    return false;
+  }
+
+  if (millis() - stuckCandidateSince < STUCK_DETECT_TIME_MS)
+    return false;
+
+  stuckCandidateSince = 0;
+  return true;
 }
 
 
@@ -476,9 +549,9 @@ bool driveCentred()
   int diff = r.cmLeft - r.cmRight;
 
 
-  if (diff > CENTRE_TOLERANCE_CM) // too close to the right wall -> steer left
+  if (diff > STEER_TOLERANCE_CM) // too close to the right wall -> steer left
     drive(LEFT_FORWARD - STEER_AMOUNT, RIGHT_FORWARD);
-  else if (diff < -CENTRE_TOLERANCE_CM) // too close to the left wall -> steer right
+  else if (diff < -STEER_TOLERANCE_CM) // too close to the left wall -> steer right
     drive(LEFT_FORWARD, RIGHT_FORWARD + STEER_AMOUNT);
   else
     moveForward();
@@ -548,23 +621,55 @@ void turn180()
 }
 
 
+// Back away from the contact point, then turn towards the side with more room.
+// If both sides look equal, prefer right for a deterministic recovery.
+void recoverFromStuck(const Readings &r)
+{
+  stopRobot();
+  waitMs(SETTLE_DELAY / 2);
+
+  moveBackward();
+  waitMs(STUCK_REVERSE_TIME_MS);
+  stopRobot();
+  waitMs(SETTLE_DELAY / 2);
+
+  int recoverySpeed = r.cmRight >= r.cmLeft
+    ? RIGHT_TURN_SPEED
+    : LEFT_TURN_SPEED;
+  turnInPlace(recoverySpeed, STUCK_TURN_TIME);
+}
+
+
 // Codes 5 & 6: turn away from the near wall, drive towards the middle,
 // turn back to be parallel, then reverse to the starting line.
 // awaySpeed turns away from the near wall, backSpeed turns back.
-void shiftTowardsMiddle(int awaySpeed, int backSpeed)
+void shiftTowardsMiddle(int awaySpeed, int backSpeed, int sideDifferenceCm)
 {
+  // Moving sideways by half the left/right difference would geometrically
+  // centre the robot. Only correct the amount outside the accepted tolerance,
+  // and cap it so noisy distance estimates cannot cause a large manoeuvre.
+  float lateralCorrectionCm =
+    (sideDifferenceCm - CENTRE_TOLERANCE_CM) / 2.0;
+  float forwardCm = lateralCorrectionCm /
+    sin(NUDGE_ANGLE_DEG * DEG_TO_RAD);
+
+  if (forwardCm < NUDGE_MIN_FORWARD_CM)
+    forwardCm = NUDGE_MIN_FORWARD_CM;
+  if (forwardCm > NUDGE_MAX_FORWARD_CM)
+    forwardCm = NUDGE_MAX_FORWARD_CM;
+
   turnInPlace(awaySpeed, NUDGE_TURN_TIME);
 
 
   moveForward();
-  waitMs(NUDGE_FORWARD_CM * FORWARD_MS_PER_CM);
+  waitMs(forwardCm * FORWARD_MS_PER_CM);
 
 
   turnInPlace(backSpeed, NUDGE_TURN_TIME);
 
 
   // Only the along-the-corridor part of the angled drive needs undoing
-  float backCm = NUDGE_FORWARD_CM * cos(NUDGE_ANGLE_DEG * DEG_TO_RAD);
+  float backCm = forwardCm * cos(NUDGE_ANGLE_DEG * DEG_TO_RAD);
   moveBackward();
   waitMs(backCm * BACKWARD_MS_PER_CM);
   stopRobot();
@@ -599,7 +704,7 @@ void rotateUntilParallel(int speed)
 // ==========================================
 
 
-// Shows a code 0-8 on the three indicator LEDs; out-of-range values are ignored
+// Shows a code 0-9 on the three indicator LEDs; out-of-range values are ignored
 void showCode(int code)
 {
   if (code < 0 || code >= LED_CODE_COUNT)
