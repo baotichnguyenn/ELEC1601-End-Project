@@ -81,9 +81,9 @@ const int TURN_180_TIME    = 2 * TURN_TIME;
 const int NUDGE_ANGLE_DEG  = 45;
 const int NUDGE_TURN_TIME  = (long)TURN_TIME * NUDGE_ANGLE_DEG / 90;
 
-// Codes 7 & 8: smaller steps and at most about 30 degrees per correction.
-const int PARALLEL_MAX_TURN_TIME = TURN_TIME / 3;
-const int PARALLEL_STEP_TIME = TURN_TIME / 24;
+// Codes 7 & 8: smaller steps 
+const int PARALLEL_MAX_TURN_TIME = TURN_TIME / 4;
+const int PARALLEL_STEP_TIME = TURN_TIME / 30;
 
 // DISTANCE THRESHOLDS IN CM (CALIBRATE THESE)
 // Readings are the *_ZONE_CM table values, so the defaults below sit between table
@@ -178,7 +178,7 @@ const float NUDGE_MAX_FORWARD_CM = 4.0;
 
 // Timing Setup
 const int STARTUP_DELAY  = 5000;
-const int SETTLE_DELAY   = 200;
+const int SETTLE_DELAY   = 300;
 
 Servo servoLeft;
 Servo servoRight;
