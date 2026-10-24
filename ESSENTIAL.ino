@@ -90,7 +90,7 @@ const int PARALLEL_STEP_TIME = TURN_TIME / 30;
 // entries to match the old zone thresholds. Retune them once the tables are measured.
 
 // Code 1: front reading at/above this = no object within 10 cm
-const int FRONT_CLEAR_MIN_CM = 10;
+const int FRONT_CLEAR_MIN_CM = 15;
 
 // Codes 1, 5 & 6: accept an approximate centre. With the default 3 cm zone
 // spacing, a two-zone difference is still close enough to start driving.
