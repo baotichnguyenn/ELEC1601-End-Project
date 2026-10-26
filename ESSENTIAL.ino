@@ -78,7 +78,7 @@ const unsigned long STUCK_DETECT_TIME_MS = 1500;
 const int TURN_180_TIME    = 2 * TURN_TIME;
 
 // Codes 5 & 6: angle turned away from the near wall before driving towards the middle
-const int NUDGE_ANGLE_DEG  = 45;
+const int NUDGE_ANGLE_DEG  = 30;
 const int NUDGE_TURN_TIME  = (long)TURN_TIME * NUDGE_ANGLE_DEG / 90;
 
 // Codes 7 & 8: smaller steps 
@@ -163,6 +163,30 @@ const int SCENARIO_STUCK_9         = 9; // FLASH ON FLASH
 const int SCENARIO_T_JUNCTION_10  = 10; // FLASH FLASH OFF
 
 // ==========================================
+// POST-TURN ALIGNMENT (safety bounds, not calibration)
+// ==========================================
+
+// Heading sweep: whole PARALLEL_STEP_TIME steps, at most this many either side of the
+// heading the turn finished on
+const int ALIGN_MAX_HEADING_STEPS = PARALLEL_MAX_TURN_TIME / PARALLEL_STEP_TIME;
+const int ALIGN_SWEEP_SIZE = 2 * ALIGN_MAX_HEADING_STEPS + 1;
+// Lateral centring: most sideways corrections attempted after one turn
+const int ALIGN_MAX_CENTRE_SHIFTS = 2;
+
+// Results, reported separately when DEBUG_SENSORS is on. ALIGNED and WITHIN_TOLERANCE
+// mean "within one sensor zone", never exactly parallel or exactly centred.
+const int HEADING_UNVERIFIED  = 0; // no reliable wall, or the sweep could not single out a heading
+const int HEADING_NOT_ALIGNED = 1; // a heading was singled out, but fresh readings there disagree
+const int HEADING_ALIGNED     = 2; // fresh readings confirm the bottom of a two-sided dip
+const char *const HEADING_RESULT_NAMES[] = { "UNVERIFIED", "NOT_ALIGNED", "ALIGNED" };
+
+const int CENTRE_NOT_APPLICABLE   = 0; // a side wall not seen reliably: centring not attempted
+const int CENTRE_UNVERIFIED       = 1; // a side wall was lost after moving
+const int CENTRE_OFF_CENTRE       = 2; // |L - R| > CENTRE_TOLERANCE_CM when it stopped
+const int CENTRE_WITHIN_TOLERANCE = 3; // |L - R| <= CENTRE_TOLERANCE_CM
+const char *const CENTRE_RESULT_NAMES[] = { "NOT_APPLICABLE", "UNVERIFIED", "OFF_CENTRE", "WITHIN_TOLERANCE" };
+
+// ==========================================
 // FORWARD/BACKWARD DISTANCES (CALIBRATE *_MS_PER_CM)
 // Drive for 2000 ms, measure the distance, then set this to 2000 / cm travelled.
 // ==========================================
@@ -177,7 +201,7 @@ const float NUDGE_MIN_FORWARD_CM = 1.5;
 const float NUDGE_MAX_FORWARD_CM = 4.0;
 
 // Timing Setup
-const int STARTUP_DELAY  = 5000;
+const int STARTUP_DELAY  = 2000;
 const int SETTLE_DELAY   = 300;
 
 Servo servoLeft;
@@ -192,6 +216,26 @@ struct Readings
   bool leftOpen;  // Raw no-reflection zone, not an assumed distance in cm
   bool rightOpen;
   bool frontOpen;
+};
+
+// Three stable readings combined: median distances, plus whether each side saw a wall in
+// every one of them (a side that flickers to "open" is not trusted as a reference)
+struct SettledReadings
+{
+  Readings r;
+  bool leftWall;
+  bool rightWall;
+};
+
+// Outcome of one heading sweep, kept so the heading can be re-verified later
+struct HeadingResult
+{
+  int result;         // HEADING_*
+  bool useLeft;       // side walls used as the reference
+  bool useRight;
+  int trough10;       // lowest reference reading of the sweep (sum of the sides, x10)
+  int step10;         // one zone of sensor resolution (x10)
+  const __FlashStringHelper *reason; // why, when not ALIGNED (nullptr if none)
 };
 
 // Indicator LED state (see showCode / updateLeds)
@@ -210,6 +254,13 @@ unsigned long lastMotionUpdate = 0;
 bool tryingTRightBranch = false;
 bool enteredTRightBranch = false;
 bool returningToT = false;
+// Post-turn alignment phase: set by a successful takeOpeningTurn(), run by the next loop() pass
+bool postTurnAlignPending = false;
+bool postTurnAlignRight = false;
+// Heading sweep samples: index ALIGN_MAX_HEADING_STEPS is the heading the turn finished
+// on, higher indices are further in the turn direction
+int sweepTotal[ALIGN_SWEEP_SIZE];
+byte sweepCount[ALIGN_SWEEP_SIZE];
 
 // ==========================================
 // SETUP
@@ -243,7 +294,18 @@ void loop()
     return;
   }
 
+  // Alignment pass after a turn: runs once (the flag is cleared first), with no
+  // classification and no change to the junction flags (arming, T branch), so the
+  // junction just taken cannot be re-triggered here. The next pass classifies normally.
+  if (postTurnAlignPending)
+  {
+    postTurnAlignPending = false;
+    alignAfterTurn(postTurnAlignRight);
+    return;
+  }
+
   Readings readings = readSensorsStable();
+
   if (!readings.leftOpen && !readings.rightOpen)
   {
     openingTurnArmed = true;
@@ -662,6 +724,8 @@ bool takeOpeningTurn(bool right, const Readings &r)
   else
     turnLeft90();
   enterCorridorAfterTurn();
+  postTurnAlignPending = true;
+  postTurnAlignRight = right;
   return true;
 }
 
@@ -706,18 +770,7 @@ void recoverFromStuck()
 // awaySpeed turns away from the near wall, backSpeed turns back.
 void shiftTowardsMiddle(int awaySpeed, int backSpeed, int sideDifferenceCm)
 {
-  // Moving sideways by half the left/right difference would geometrically
-  // centre the robot. Only correct the amount outside the accepted tolerance,
-  // and cap it so noisy distance estimates cannot cause a large manoeuvre.
-  float lateralCorrectionCm =
-    (sideDifferenceCm - CENTRE_TOLERANCE_CM) / 2.0;
-  float forwardCm = lateralCorrectionCm /
-    sin(NUDGE_ANGLE_DEG * DEG_TO_RAD);
-
-  if (forwardCm < NUDGE_MIN_FORWARD_CM)
-    forwardCm = NUDGE_MIN_FORWARD_CM;
-  if (forwardCm > NUDGE_MAX_FORWARD_CM)
-    forwardCm = NUDGE_MAX_FORWARD_CM;
+  float forwardCm = nudgeForwardCm(sideDifferenceCm);
 
   turnInPlace(awaySpeed, NUDGE_TURN_TIME);
 
@@ -731,6 +784,25 @@ void shiftTowardsMiddle(int awaySpeed, int backSpeed, int sideDifferenceCm)
   waitMs(backCm * BACKWARD_MS_PER_CM);
   stopRobot();
   waitMs(SETTLE_DELAY);
+}
+
+// Codes 5 & 6 and post-turn centring: length of the diagonal drive that corrects a
+// left/right difference.
+float nudgeForwardCm(int sideDifferenceCm)
+{
+  // Moving sideways by half the left/right difference would geometrically
+  // centre the robot. Only correct the amount outside the accepted tolerance,
+  // and cap it so noisy distance estimates cannot cause a large manoeuvre.
+  float lateralCorrectionCm =
+    (sideDifferenceCm - CENTRE_TOLERANCE_CM) / 2.0;
+  float forwardCm = lateralCorrectionCm /
+    sin(NUDGE_ANGLE_DEG * DEG_TO_RAD);
+
+  if (forwardCm < NUDGE_MIN_FORWARD_CM)
+    forwardCm = NUDGE_MIN_FORWARD_CM;
+  if (forwardCm > NUDGE_MAX_FORWARD_CM)
+    forwardCm = NUDGE_MAX_FORWARD_CM;
+  return forwardCm;
 }
 
 // Stop between short rotations to obtain stable readings. Front clearance is
@@ -753,11 +825,423 @@ bool rotateUntilParallel(int speed)
     if (rotatedMs >= PARALLEL_MAX_TURN_TIME)
       return frontClear;
     int stepMs = min(PARALLEL_STEP_TIME, PARALLEL_MAX_TURN_TIME - rotatedMs);
-    drive(speed, speed);
-    waitMs(stepMs);
-    stopRobot();
-    waitMs(SETTLE_DELAY / 2);
+    rotateStep(speed, stepMs);
     rotatedMs += stepMs;
+  }
+}
+
+// One small rotation, then a pause so the next reading is taken while stopped.
+// Shared by codes 7/8 and the post-turn heading probe.
+void rotateStep(int speed, int stepMs)
+{
+  drive(speed, speed);
+  waitMs(stepMs);
+  stopRobot();
+  waitMs(SETTLE_DELAY / 2);
+}
+
+void rotateSteps(int speed, int steps)
+{
+  for (int i = 0; i < steps; i++)
+    rotateStep(speed, PARALLEL_STEP_TIME);
+}
+
+// ==========================================
+// POST-TURN ALIGNMENT
+// ==========================================
+
+// Heading: each side sensor points square to the robot, so its beam meets a straight wall
+// soonest when the robot is parallel to that wall, and further away the more the robot is
+// turned either way. Sweeping the heading both ways gives a dip in the side readings, and
+// parallel is the middle of the dip. With both walls the two side readings are added: that
+// cancels the bias each sensor gets from sitting ahead of or behind the turning centre, and
+// the sum stays the same when the robot moves sideways between parallel walls, so it can
+// also re-check the heading after centring. The front sensor is not used for heading.
+
+int median3(int a, int b, int c)
+{
+  if (a > b) { int t = a; a = b; b = t; }
+  if (b > c) { int t = b; b = c; c = t; }
+  if (a > b) { int t = a; a = b; b = t; }
+  return b;
+}
+
+// Used where a decision moves the robot: three stable readings, median per sensor
+SettledReadings readSensorsSettled()
+{
+  Readings a = readSensorsStable();
+  Readings b = readSensorsStable();
+  Readings c = readSensorsStable();
+  SettledReadings s;
+
+  s.r.cmLeft = median3(a.cmLeft, b.cmLeft, c.cmLeft);
+  s.r.cmMiddle = median3(a.cmMiddle, b.cmMiddle, c.cmMiddle);
+  s.r.cmRight = median3(a.cmRight, b.cmRight, c.cmRight);
+  s.r.leftOpen = a.leftOpen + b.leftOpen + c.leftOpen >= 2;
+  s.r.rightOpen = a.rightOpen + b.rightOpen + c.rightOpen >= 2;
+  s.r.frontOpen = a.frontOpen + b.frontOpen + c.frontOpen >= 2;
+  s.leftWall = !a.leftOpen && !b.leftOpen && !c.leftOpen;
+  s.rightWall = !a.rightOpen && !b.rightOpen && !c.rightOpen;
+  return s;
+}
+
+// Sum of the reference side readings: lowest when the robot is parallel
+int wallSum(const Readings &r, bool useLeft, bool useRight)
+{
+  int sum = 0;
+  if (useLeft)
+    sum += r.cmLeft;
+  if (useRight)
+    sum += r.cmRight;
+  return sum;
+}
+
+// Smallest gap between neighbouring entries of a zone table: one zone of resolution
+int zoneStepCm(const IrSensor &sensor)
+{
+  int step = sensor.zoneCm[1] - sensor.zoneCm[0];
+  for (int i = 2; i < NUM_ZONES; i++)
+    step = min(step, sensor.zoneCm[i] - sensor.zoneCm[i - 1]);
+  return max(step, 1);
+}
+
+// Records one reading at a sweep position; returns that reading (x10)
+int sampleSweep(int index, const HeadingResult &h)
+{
+  int sum = wallSum(readSensorsStable(), h.useLeft, h.useRight);
+  sweepTotal[index] += sum;
+  sweepCount[index]++;
+  return sum * 10;
+}
+
+// Average of the readings at a sweep position (x10, so half zones are kept)
+int sweepAvg10(int index)
+{
+  return sweepTotal[index] * 10 / sweepCount[index];
+}
+
+// Looks for the lowest stretch of the sampled positions lo..hi. Succeeds only if it is a
+// single block with a position at least one zone higher on BOTH sides of it, i.e. the
+// sweep went past the parallel heading each way. Flat, one-sided or patchy readings fail.
+bool findTrough(int lo, int hi, int step10, int &target, int &trough10, const __FlashStringHelper *&reason)
+{
+  trough10 = sweepAvg10(lo);
+  for (int i = lo + 1; i <= hi; i++)
+    trough10 = min(trough10, sweepAvg10(i));
+
+  int first = -1;
+  int last = -1;
+  for (int i = lo; i <= hi; i++)
+  {
+    if (sweepAvg10(i) > trough10 + step10 / 2)
+      continue;
+    if (first >= 0 && i != last + 1)
+    {
+      reason = F("two separate low stretches");
+      return false;
+    }
+    if (first < 0)
+      first = i;
+    last = i;
+  }
+
+  bool riseBefore = false;
+  bool riseAfter = false;
+  for (int i = lo; i < first; i++)
+    riseBefore = riseBefore || sweepAvg10(i) >= trough10 + step10;
+  for (int i = last + 1; i <= hi; i++)
+    riseAfter = riseAfter || sweepAvg10(i) >= trough10 + step10;
+  if (!riseBefore || !riseAfter)
+  {
+    reason = F("no dip with a rise on both sides");
+    return false;
+  }
+
+  target = (first + last) / 2;
+  return true;
+}
+
+// Higher sweep index = further in the turn direction
+void rotateToIndex(int from, int to, int turnSpeed, int otherSpeed)
+{
+  if (to > from)
+    rotateSteps(turnSpeed, to - from);
+  else
+    rotateSteps(otherSpeed, from - to);
+}
+
+// True if fresh readings put the robot at the bottom of the sweep's dip (within half a zone)
+bool headingVerified(const SettledReadings &s, const HeadingResult &h)
+{
+  if ((h.useLeft && !s.leftWall) || (h.useRight && !s.rightWall))
+    return false;
+  return wallSum(s.r, h.useLeft, h.useRight) * 10 <= h.trough10 + h.step10 / 2;
+}
+
+void printSweep(int lo, int hi)
+{
+  Serial.print(F("heading sweep (step: avg cm):"));
+  for (int i = lo; i <= hi; i++)
+  {
+    int avg10 = sweepAvg10(i);
+    Serial.print(' ');
+    Serial.print(i - ALIGN_MAX_HEADING_STEPS);
+    Serial.print(':');
+    Serial.print(avg10 / 10);
+    Serial.print('.');
+    Serial.print(avg10 % 10);
+  }
+  Serial.println();
+}
+
+// Sweeps the heading out in the turn direction, then back through the start to the other
+// side, reading after every step. Each side ends early once two positions in a row read a
+// full zone above the lowest so far (it has climbed out of the dip); the far side is always
+// tried. Ends at the middle of the dip if one was found, otherwise back at the start.
+HeadingResult alignHeading(bool turnedRight)
+{
+  HeadingResult h;
+  h.result = HEADING_UNVERIFIED;
+  h.trough10 = 0;
+  h.step10 = 0;
+  h.reason = nullptr;
+
+  SettledReadings start = readSensorsSettled();
+  h.useLeft = start.leftWall;
+  h.useRight = start.rightWall;
+  if (!h.useLeft && !h.useRight)
+  {
+    h.reason = F("no side wall seen reliably");
+    return h;
+  }
+
+  int stepCm = h.useLeft ? zoneStepCm(leftSensor) : zoneStepCm(rightSensor);
+  if (h.useLeft && h.useRight)
+    stepCm = min(stepCm, zoneStepCm(rightSensor));
+  h.step10 = stepCm * 10;
+
+  int turnSpeed = turnedRight ? RIGHT_TURN_SPEED : LEFT_TURN_SPEED;
+  int otherSpeed = turnedRight ? LEFT_TURN_SPEED : RIGHT_TURN_SPEED;
+  const int startIndex = ALIGN_MAX_HEADING_STEPS;
+
+  for (int i = 0; i < ALIGN_SWEEP_SIZE; i++)
+  {
+    sweepTotal[i] = 0;
+    sweepCount[i] = 0;
+  }
+  sweepTotal[startIndex] = wallSum(start.r, h.useLeft, h.useRight);
+  sweepCount[startIndex] = 1;
+  int lowest10 = sweepAvg10(startIndex);
+
+  int index = startIndex;
+  int rising = 0;
+  while (index < ALIGN_SWEEP_SIZE - 1 && rising < 2)
+  {
+    rotateStep(turnSpeed, PARALLEL_STEP_TIME);
+    int reading10 = sampleSweep(++index, h);
+    lowest10 = min(lowest10, sweepAvg10(index));
+    rising = reading10 >= lowest10 + h.step10 ? rising + 1 : 0;
+  }
+  int hi = index;
+
+  rising = 0;
+  while (index > 0 && rising < 2)
+  {
+    rotateStep(otherSpeed, PARALLEL_STEP_TIME);
+    int reading10 = sampleSweep(--index, h);
+    lowest10 = min(lowest10, sweepAvg10(index));
+    rising = index < startIndex && reading10 >= lowest10 + h.step10 ? rising + 1 : 0;
+  }
+  int lo = index;
+
+  if (DEBUG_SENSORS)
+    printSweep(lo, hi);
+
+  int target;
+  if (!findTrough(lo, hi, h.step10, target, h.trough10, h.reason))
+  {
+    rotateToIndex(index, startIndex, turnSpeed, otherSpeed); // keep the calibrated turn's heading
+    return h;
+  }
+
+  rotateToIndex(index, target, turnSpeed, otherSpeed);
+
+  // Timed steps do not retrace exactly: confirm with fresh readings where it stopped
+  if (headingVerified(readSensorsSettled(), h))
+    h.result = HEADING_ALIGNED;
+  else
+  {
+    h.result = HEADING_NOT_ALIGNED;
+    h.reason = F("fresh readings above the dip");
+  }
+  return h;
+}
+
+// One post-turn sideways correction: turn NUDGE_ANGLE_DEG away from the nearer wall, creep
+// forward while checking the front before every few mm, then turn back straight. Unlike
+// shiftTowardsMiddle() it does not reverse afterwards: there is no rear sensor, and behind
+// the robot is the junction it has just left. Returns false if the front check cut it short.
+bool centringNudge(bool nearLeftWall, int sideDifferenceCm)
+{
+  int awaySpeed = nearLeftWall ? RIGHT_TURN_SPEED : LEFT_TURN_SPEED;
+  int backSpeed = nearLeftWall ? LEFT_TURN_SPEED : RIGHT_TURN_SPEED;
+  unsigned long driveMs = nudgeForwardCm(sideDifferenceCm) * FORWARD_MS_PER_CM;
+  bool completed = true;
+
+  turnInPlace(awaySpeed, NUDGE_TURN_TIME);
+
+  unsigned long start = millis();
+  while (millis() - start < driveMs)
+  {
+    if (middleSensor.zoneCm[irDistance(middleSensor)] < FRONT_CLEAR_MIN_CM)
+    {
+      completed = false;
+      break;
+    }
+    moveForward();
+    updateLeds();
+  }
+
+  turnInPlace(backSpeed, NUDGE_TURN_TIME); // stops first
+  return completed;
+}
+
+// Needs both side walls in every reading. Corrects only while each attempt reduces the
+// left/right difference, the front stays clear, and fewer than ALIGN_MAX_CENTRE_SHIFTS
+// attempts have been made. moved reports whether any correction was driven.
+int centreBetweenWalls(bool &moved, const __FlashStringHelper *&reason)
+{
+  moved = false;
+  reason = nullptr;
+
+  SettledReadings s = readSensorsSettled();
+  if (!s.leftWall || !s.rightWall)
+  {
+    reason = F("both side walls not seen reliably");
+    return CENTRE_NOT_APPLICABLE;
+  }
+
+  int diff = s.r.cmLeft - s.r.cmRight; // < 0: closer to the left wall
+  for (int shifts = 0; abs(diff) > CENTRE_TOLERANCE_CM; shifts++)
+  {
+    if (shifts >= ALIGN_MAX_CENTRE_SHIFTS)
+    {
+      reason = F("correction limit reached");
+      break;
+    }
+    if (s.r.cmMiddle < FRONT_CLEAR_MIN_CM)
+    {
+      reason = F("front not clear, correction skipped");
+      break;
+    }
+
+    bool completed = centringNudge(diff < 0, abs(diff));
+    moved = true;
+
+    s = readSensorsSettled();
+    if (!s.leftWall || !s.rightWall)
+    {
+      reason = F("a side wall was lost");
+      return CENTRE_UNVERIFIED;
+    }
+    int newDiff = s.r.cmLeft - s.r.cmRight;
+    bool improved = abs(newDiff) < abs(diff);
+    diff = newDiff;
+
+    if (!completed)
+    {
+      reason = F("front check stopped the correction");
+      break;
+    }
+    if (!improved)
+    {
+      reason = F("correction did not reduce the difference");
+      break;
+    }
+  }
+
+  return abs(diff) <= CENTRE_TOLERANCE_CM ? CENTRE_WITHIN_TOLERANCE : CENTRE_OFF_CENTRE;
+}
+
+// After a 90 degree turn and the corridor entry: settle, align the heading, centre, re-check
+// the heading if centring moved the robot, then verify both from fresh readings. Every part
+// is bounded. Leaves the motors stopped and the junction / branch flags untouched.
+void alignAfterTurn(bool turnedRight)
+{
+  stopRobot();
+  waitMs(SETTLE_DELAY);
+
+  HeadingResult heading = alignHeading(turnedRight);
+
+  bool moved;
+  const __FlashStringHelper *centreReason;
+  int centre = centreBetweenWalls(moved, centreReason);
+
+  // A sideways correction can leave the robot turned. A two-wall heading can be re-checked
+  // directly (the sum of the sides does not change with sideways position); anything else
+  // gets one more sweep.
+  bool resweep = false;
+  if (moved)
+  {
+    bool stillAligned = heading.result == HEADING_ALIGNED && heading.useLeft && heading.useRight &&
+                        headingVerified(readSensorsSettled(), heading);
+    if (!stillAligned)
+    {
+      heading = alignHeading(turnedRight);
+      resweep = true;
+    }
+  }
+
+  // Final verification from fresh readings
+  SettledReadings last = readSensorsSettled();
+  if (heading.result == HEADING_ALIGNED && !headingVerified(last, heading))
+  {
+    heading.result = HEADING_NOT_ALIGNED;
+    heading.reason = F("final check above the dip");
+  }
+  if (centre == CENTRE_WITHIN_TOLERANCE || centre == CENTRE_OFF_CENTRE)
+  {
+    if (!last.leftWall || !last.rightWall)
+    {
+      centre = CENTRE_UNVERIFIED;
+      centreReason = F("a side wall was lost");
+    }
+    else
+      centre = abs(last.r.cmLeft - last.r.cmRight) <= CENTRE_TOLERANCE_CM ?
+               CENTRE_WITHIN_TOLERANCE : CENTRE_OFF_CENTRE;
+  }
+
+  stopRobot();
+  stuckCandidateSince = 0; // time spent aligning is not time spent stuck
+
+  if (DEBUG_SENSORS)
+  {
+    Serial.print(F("align after "));
+    Serial.print(turnedRight ? "right" : "left");
+    Serial.print(F(" turn: heading "));
+    Serial.print(HEADING_RESULT_NAMES[heading.result]);
+    Serial.print(F(" ("));
+    Serial.print(heading.useLeft + heading.useRight);
+    Serial.print(F(" wall ref"));
+    if (resweep)
+      Serial.print(F(", re-swept after centring"));
+    if (heading.reason)
+    {
+      Serial.print(F(", "));
+      Serial.print(heading.reason);
+    }
+    Serial.print(F(") | centre "));
+    Serial.print(CENTRE_RESULT_NAMES[centre]);
+    Serial.print(F(" (L "));
+    Serial.print(last.r.cmLeft);
+    Serial.print(F(" R "));
+    Serial.print(last.r.cmRight);
+    if (centreReason)
+    {
+      Serial.print(F(", "));
+      Serial.print(centreReason);
+    }
+    Serial.println(')');
   }
 }
 
