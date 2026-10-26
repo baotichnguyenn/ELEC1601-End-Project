@@ -110,7 +110,7 @@ const int TURN_SIDE_MAX_CM = 15;
 
 // Code 4: front, left and right readings all within (x, y)
 const int DEAD_END_MIN_CM = 0;
-const int DEAD_END_MAX_CM = 9;
+const int DEAD_END_MAX_CM = 10;
 
 // Upper estimate for no object in front, also used by rotation stopping logic.
 const int NO_OBJECT_MIN_CM = 16;
@@ -197,6 +197,11 @@ const int CORRIDOR_FORWARD_CM = 5; // Code 1: move 5 cm
 // Allow an open junction to be crossed before assuming the maze has ended.
 // Counts only commanded forward travel, using the existing calibration.
 const int EXIT_CLEAR_TRAVEL_CM = 15;
+// Maze finish: the finish is a long dead end. A dead end (code 4) reached after driving
+// straight between two side walls for at least this long stops the robot for good.
+// Counts forward-driving time only (about 40 cm at FORWARD_MS_PER_CM = 75). Set it
+// between the longest ordinary dead-end corridor and the finish corridor.
+const unsigned long FINISH_CORRIDOR_MIN_MS = 3000;
 const float NUDGE_MIN_FORWARD_CM = 1.5;
 const float NUDGE_MAX_FORWARD_CM = 4.0;
 
@@ -261,6 +266,11 @@ bool postTurnAlignRight = false;
 // on, higher indices are further in the turn direction
 int sweepTotal[ALIGN_SWEEP_SIZE];
 byte sweepCount[ALIGN_SWEEP_SIZE];
+// Straight-corridor timer (see updateStraightCorridorTime) and the finish stop
+unsigned long straightCorridorMs = 0;
+bool corridorBothWalls = false;
+unsigned long lastCorridorUpdate = 0;
+bool mazeFinished = false;
 
 // ==========================================
 // SETUP
@@ -294,6 +304,13 @@ void loop()
     return;
   }
 
+  // Finish reached: servos detached, nothing more to do except keep the LEDs going
+  if (mazeFinished)
+  {
+    updateLeds();
+    return;
+  }
+
   // Alignment pass after a turn: runs once (the flag is cleared first), with no
   // classification and no change to the junction flags (arming, T branch), so the
   // junction just taken cannot be re-triggered here. The next pass classifies normally.
@@ -305,6 +322,7 @@ void loop()
   }
 
   Readings readings = readSensorsStable();
+  noteCorridorWalls(readings);
 
   if (!readings.leftOpen && !readings.rightOpen)
   {
@@ -321,7 +339,8 @@ void loop()
     Serial.print(readings.cmMiddle); Serial.print(' ');
     Serial.print(readings.cmRight); Serial.print(" | open L/R ");
     Serial.print(readings.leftOpen); Serial.print('/');
-    Serial.print(readings.rightOpen); Serial.print(" -> code ");
+    Serial.print(readings.rightOpen); Serial.print(" | straight ms ");
+    Serial.print(straightCorridorMs); Serial.print(" -> code ");
     Serial.println(scenario);
   }
   showCode(scenario);
@@ -344,6 +363,12 @@ void loop()
       break;
 
     case SCENARIO_DEAD_END_4:
+      // The finish is a long dead end: stop for good if this one ends a long straight corridor
+      if (straightCorridorMs >= FINISH_CORRIDOR_MIN_MS)
+      {
+        stopAtFinish();
+        break;
+      }
       startingPositionPhase = false;
       returningToT = tryingTRightBranch;
       tryingTRightBranch = false;
@@ -571,6 +596,7 @@ bool stuckRecoveryNeeded(const Readings &r, int scenario)
 void drive(int leftMicros, int rightMicros)
 {
   updateOpenTravelTime();
+  updateStraightCorridorTime();
   drivingForward = leftMicros > LEFT_STOP && rightMicros < RIGHT_STOP;
   servoLeft.writeMicroseconds(leftMicros);
   servoRight.writeMicroseconds(rightMicros);
@@ -596,6 +622,7 @@ void stopRobot()
 bool driveCentred()
 {
   Readings r = readSensors();
+  noteCorridorWalls(r);
   if (mazeExitStopNeeded(r))
   {
     showCode(SCENARIO_UNKNOWN_0);
@@ -655,6 +682,7 @@ void moveForwardCm(int cm)
 
 void turnInPlace(int speed, int duration)
 {
+  resetStraightCorridor();
   stopRobot();
   waitMs(SETTLE_DELAY);
 
@@ -751,6 +779,7 @@ void turn180()
 // correction, rather than imposing a recovery direction or turn angle.
 void recoverFromStuck()
 {
+  resetStraightCorridor();
   stopRobot();
   waitMs(SETTLE_DELAY);
 
@@ -834,6 +863,7 @@ bool rotateUntilParallel(int speed)
 // Shared by codes 7/8 and the post-turn heading probe.
 void rotateStep(int speed, int stepMs)
 {
+  resetStraightCorridor();
   drive(speed, speed);
   waitMs(stepMs);
   stopRobot();
@@ -1400,6 +1430,50 @@ void updateOpenTravelTime()
     openForwardTimeMs += min(elapsed, remaining);
   }
   lastMotionUpdate = now;
+}
+
+// Straight-corridor timer. Like the open-travel timer above, it only counts time while
+// the wheels are driving forward, here while the last reading saw both side walls.
+// Called on every servo command (from drive()).
+void updateStraightCorridorTime()
+{
+  unsigned long now = millis();
+  if (corridorBothWalls && drivingForward)
+    straightCorridorMs += now - lastCorridorUpdate;
+  lastCorridorUpdate = now;
+}
+
+// Feeds a new reading to the timer: an open side ends the straight corridor
+void noteCorridorWalls(const Readings &r)
+{
+  updateStraightCorridorTime();
+  corridorBothWalls = !r.leftOpen && !r.rightOpen;
+  if (!corridorBothWalls)
+    straightCorridorMs = 0;
+}
+
+// Turning, spinning or reversing also ends the straight corridor
+void resetStraightCorridor()
+{
+  straightCorridorMs = 0;
+  corridorBothWalls = false;
+}
+
+// Code 4 at the end of a long straight corridor: stop for good. Detaching the servos
+// stops the pulses, so the wheels cannot creep on imperfect stop values.
+void stopAtFinish()
+{
+  stopRobot();
+  servoLeft.detach();
+  servoRight.detach();
+  mazeFinished = true;
+
+  if (DEBUG_SENSORS)
+  {
+    Serial.print(F("FINISH: dead end after "));
+    Serial.print(straightCorridorMs);
+    Serial.println(F(" ms of straight corridor, robot stopped"));
+  }
 }
 
 bool mazeExitStopNeeded(const Readings &r)
