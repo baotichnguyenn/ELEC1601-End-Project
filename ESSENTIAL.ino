@@ -163,6 +163,32 @@ const int SCENARIO_STUCK_9         = 9; // FLASH ON FLASH
 const int SCENARIO_T_JUNCTION_10  = 10; // FLASH FLASH OFF
 
 // ==========================================
+// ASSESSMENT TASKS (MISSION_MODE)
+// ==========================================
+
+// 0 = the normal scenario 0-10 driving. 1-4 = one assessment path, run once, then stop:
+//   1 Blue   - straighten up from a bad start, follow the corridor, stop at the wall ahead
+//   2 Purple - task 1, then turn into the open side, centre, follow, stop at the next wall
+//   3 Yellow - follow the corridor and turn at every wall until a dead end, then stop
+//   4 Green  - task 3, turn 180 at the dead end, then task 3 again back to the start
+const int MISSION_MODE = 1;
+
+// Stop in front of a wall once the front reads this or less, twice in a row. Set it to the
+// reading with the robot in the middle of a corner, so it turns in the right place. MEASURE.
+const int MISSION_FRONT_STOP_CM = 8;
+
+// After a turn, drive into the new corridor until both side walls are seen (at most this
+// far), so the centring after the turn has two walls to centre between
+const int MISSION_ENTER_MAX_CM = 15;
+
+// At a wall with both sides open, turn right (true) or left (false)
+const bool MISSION_PREFER_RIGHT = true;
+
+// Safety limits: the longest single corridor leg, and the most turns in one task 3 run
+const unsigned long MISSION_MAX_LEG_MS = 20000;
+const int MISSION_MAX_TURNS = 20;
+
+// ==========================================
 // POST-TURN ALIGNMENT (safety bounds, not calibration)
 // ==========================================
 
@@ -308,6 +334,13 @@ void loop()
   if (mazeFinished)
   {
     updateLeds();
+    return;
+  }
+
+  // Assessment task: runs once from start to finish, then the robot stays stopped
+  if (MISSION_MODE != 0)
+  {
+    runMission();
     return;
   }
 
@@ -634,23 +667,30 @@ bool driveCentred()
     stopRobot();
     return false;
   }
+  steerBetweenWalls(r);
+  return true;
+}
+
+// The steering part of driveCentred(), shared with the assessment tasks' corridor following
+void steerBetweenWalls(const Readings &r)
+{
   // Respond to a nearby wall even when the opposite side is still an opening.
   if (!r.rightOpen && r.cmRight <= SIDE_CLEARANCE_MIN_CM &&
       (r.leftOpen || r.cmLeft > r.cmRight))
   {
     drive(LEFT_FORWARD - STEER_AMOUNT, RIGHT_FORWARD);
-    return true;
+    return;
   }
   if (!r.leftOpen && r.cmLeft <= SIDE_CLEARANCE_MIN_CM &&
       (r.rightOpen || r.cmRight > r.cmLeft))
   {
     drive(LEFT_FORWARD, RIGHT_FORWARD + STEER_AMOUNT);
-    return true;
+    return;
   }
   if (r.leftOpen || r.rightOpen)
   {
     moveForward();
-    return true;
+    return;
   }
 
   int diff = r.cmLeft - r.cmRight;
@@ -661,7 +701,6 @@ bool driveCentred()
     drive(LEFT_FORWARD, RIGHT_FORWARD + STEER_AMOUNT);
   else
     moveForward();
-  return true;
 }
 
 // Drives a set distance, staying centred
@@ -1198,6 +1237,14 @@ int centreBetweenWalls(bool &moved, const __FlashStringHelper *&reason)
 // is bounded. Leaves the motors stopped and the junction / branch flags untouched.
 void alignAfterTurn(bool turnedRight)
 {
+  alignInCorridor(turnedRight, turnedRight ? F("right turn") : F("left turn"));
+}
+
+// The routine behind alignAfterTurn(), also used at the start and after a 180 turn.
+// sweepRightFirst picks the first heading-sweep direction; label is for the printout.
+void alignInCorridor(bool sweepRightFirst, const __FlashStringHelper *label)
+{
+  bool turnedRight = sweepRightFirst;
   stopRobot();
   waitMs(SETTLE_DELAY);
 
@@ -1247,8 +1294,8 @@ void alignAfterTurn(bool turnedRight)
   if (DEBUG_SENSORS)
   {
     Serial.print(F("align after "));
-    Serial.print(turnedRight ? "right" : "left");
-    Serial.print(F(" turn: heading "));
+    Serial.print(label);
+    Serial.print(F(": heading "));
     Serial.print(HEADING_RESULT_NAMES[heading.result]);
     Serial.print(F(" ("));
     Serial.print(heading.useLeft + heading.useRight);
@@ -1273,6 +1320,192 @@ void alignAfterTurn(bool turnedRight)
     }
     Serial.println(')');
   }
+}
+
+// ==========================================
+// ASSESSMENT TASKS
+// ==========================================
+//
+// Built from the existing pieces: the corridor steering (steerBetweenWalls), the code 7/8
+// rotation for a big starting angle, and the heading sweep + centring (alignInCorridor).
+
+// Bad start: a big angle towards a wall (front and that side close) is first reduced with
+// the code 7/8 rotation; then the heading sweep and centring straighten and centre it.
+void alignAtStart()
+{
+  Readings r = readSensorsSettled().r;
+  if (angledTowards(r.cmLeft, r.cmRight, r.cmMiddle, leftSensor, rightSensor))
+  {
+    showCode(SCENARIO_ANGLED_LEFT_7);
+    rotateUntilParallel(RIGHT_TURN_SPEED);
+  }
+  else if (angledTowards(r.cmRight, r.cmLeft, r.cmMiddle, rightSensor, leftSensor))
+  {
+    showCode(SCENARIO_ANGLED_RIGHT_8);
+    rotateUntilParallel(LEFT_TURN_SPEED);
+  }
+  alignInCorridor(true, F("start"));
+}
+
+// Follows the corridor, steering to stay in the middle, until a wall is close in front
+// (two readings in a row). Side openings are ignored. False if no wall within the leg limit.
+bool followCorridorUntilWall()
+{
+  showCode(SCENARIO_CORRIDOR_1);
+  int closeReadings = 0;
+  unsigned long start = millis();
+
+  while (millis() - start < MISSION_MAX_LEG_MS)
+  {
+    Readings r = readSensors();
+    if (!r.frontOpen && r.cmMiddle <= MISSION_FRONT_STOP_CM)
+    {
+      stopRobot();
+      if (++closeReadings >= 2)
+      {
+        waitMs(SETTLE_DELAY);
+        if (DEBUG_SENSORS)
+          Serial.println(F("mission: wall ahead, stopped"));
+        return true;
+      }
+      continue;
+    }
+    closeReadings = 0;
+    steerBetweenWalls(r);
+    updateLeds();
+  }
+
+  stopRobot();
+  if (DEBUG_SENSORS)
+    Serial.println(F("mission: no wall within the leg limit"));
+  return false;
+}
+
+// Drives into the corridor just turned into, steering, until both side walls are seen
+// twice in a row, a wall comes up ahead, or MISSION_ENTER_MAX_CM has been driven
+void enterNewCorridor()
+{
+  unsigned long maxMs = (unsigned long)MISSION_ENTER_MAX_CM * FORWARD_MS_PER_CM;
+  unsigned long start = millis();
+  int bothWalls = 0;
+
+  while (millis() - start < maxMs)
+  {
+    Readings r = readSensors();
+    if (!r.frontOpen && r.cmMiddle <= MISSION_FRONT_STOP_CM)
+      break;
+    if (!r.leftOpen && !r.rightOpen)
+    {
+      if (++bothWalls >= 2)
+        break;
+    }
+    else
+      bothWalls = 0;
+    steerBetweenWalls(r);
+    updateLeds();
+  }
+  stopRobot();
+}
+
+// Stopped at a wall: which side is open? +1 right, -1 left, 0 dead end (both sides walled)
+int openSideAtWall()
+{
+  SettledReadings s = readSensorsSettled();
+  if (DEBUG_SENSORS)
+  {
+    Serial.print(F("mission: at wall, cm L M R "));
+    Serial.print(s.r.cmLeft); Serial.print(' ');
+    Serial.print(s.r.cmMiddle); Serial.print(' ');
+    Serial.println(s.r.cmRight);
+  }
+  if (s.r.leftOpen && s.r.rightOpen)
+    return MISSION_PREFER_RIGHT ? 1 : -1;
+  if (s.r.rightOpen)
+    return 1;
+  if (s.r.leftOpen)
+    return -1;
+  return 0;
+}
+
+// At a wall: turn 90 towards the open side, drive in until both side walls are seen, then
+// straighten and centre. False (and nothing moves) if this is a dead end.
+bool turnAtWall()
+{
+  int side = openSideAtWall();
+  if (side == 0)
+  {
+    showCode(SCENARIO_DEAD_END_4);
+    if (DEBUG_SENSORS)
+      Serial.println(F("mission: dead end"));
+    return false;
+  }
+
+  bool right = side > 0;
+  showCode(right ? SCENARIO_RIGHT_TURN_2 : SCENARIO_LEFT_TURN_3);
+  if (right)
+    turnRight90();
+  else
+    turnLeft90();
+  enterNewCorridor();
+  alignAfterTurn(right);
+  return true;
+}
+
+// Task 3: follow and turn at every wall until a dead end. False if a safety limit was hit.
+bool followToDeadEnd()
+{
+  for (int turns = 0; turns <= MISSION_MAX_TURNS; turns++)
+  {
+    if (!followCorridorUntilWall())
+      return false;
+    if (!turnAtWall())
+      return true;
+  }
+  return false;
+}
+
+// Runs the selected task once, then stops for good
+void runMission()
+{
+  if (DEBUG_SENSORS)
+  {
+    Serial.print(F("mission: task "));
+    Serial.println(MISSION_MODE);
+  }
+
+  alignAtStart();
+
+  bool ok = false;
+  switch (MISSION_MODE)
+  {
+    case 1: // Blue
+      ok = followCorridorUntilWall();
+      break;
+
+    case 2: // Purple
+      ok = followCorridorUntilWall() && turnAtWall() && followCorridorUntilWall();
+      break;
+
+    case 3: // Yellow
+      ok = followToDeadEnd();
+      break;
+
+    case 4: // Green
+      ok = followToDeadEnd();
+      if (ok)
+      {
+        showCode(SCENARIO_DEAD_END_4);
+        turn180();
+        alignInCorridor(true, F("180 turn"));
+        ok = followToDeadEnd();
+      }
+      break;
+  }
+
+  haltRobot();
+  if (DEBUG_SENSORS)
+    Serial.println(ok ? F("mission: task complete, robot stopped")
+                      : F("mission: task stopped early (see above)"));
 }
 
 // ==========================================
@@ -1459,14 +1692,20 @@ void resetStraightCorridor()
   corridorBothWalls = false;
 }
 
-// Code 4 at the end of a long straight corridor: stop for good. Detaching the servos
-// stops the pulses, so the wheels cannot creep on imperfect stop values.
-void stopAtFinish()
+// Stops for good. Detaching the servos stops the pulses, so the wheels cannot creep on
+// imperfect stop values. loop() then only keeps the LEDs going.
+void haltRobot()
 {
   stopRobot();
   servoLeft.detach();
   servoRight.detach();
   mazeFinished = true;
+}
+
+// Code 4 at the end of a long straight corridor: stop for good
+void stopAtFinish()
+{
+  haltRobot();
 
   if (DEBUG_SENSORS)
   {
