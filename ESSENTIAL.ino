@@ -194,14 +194,12 @@ const char *const CENTRE_RESULT_NAMES[] = { "NOT_APPLICABLE", "UNVERIFIED", "OFF
 const int FORWARD_MS_PER_CM   = 75;
 const int BACKWARD_MS_PER_CM  = 75;
 const int CORRIDOR_FORWARD_CM = 5; // Code 1: move 5 cm
-// Allow an open junction to be crossed before assuming the maze has ended.
-// Counts only commanded forward travel, using the existing calibration.
-const int EXIT_CLEAR_TRAVEL_CM = 15;
-// Maze finish: the finish is a long dead end. A dead end (code 4) reached after driving
-// straight between two side walls for at least this long stops the robot for good.
-// Counts forward-driving time only (about 40 cm at FORWARD_MS_PER_CM = 75). Set it
-// between the longest ordinary dead-end corridor and the finish corridor.
-const unsigned long FINISH_CORRIDOR_MIN_MS = 3000;
+// Maze finish: the finish is always a long dead end. A dead end (code 4) reached after
+// driving at least this far straight between two side walls stops the robot for good.
+// Measured as forward-driving time and converted with FORWARD_MS_PER_CM. Set it to about
+// 1.5 tiles for a 2-tile finish: longer than any ordinary dead-end corridor, shorter than
+// the finish corridor (see callibration.md).
+const int FINISH_CORRIDOR_MIN_CM = 40;
 const float NUDGE_MIN_FORWARD_CM = 1.5;
 const float NUDGE_MAX_FORWARD_CM = 4.0;
 
@@ -251,11 +249,7 @@ bool openingTurnArmed = true; // Rearm after both side walls are detected again.
 bool startingPositionPhase = true; // Codes 5/6 are only for initial alignment.
 bool hasCompletedForwardStep = false; // Keep reverse recovery disabled at startup.
 unsigned long stuckCandidateSince = 0;
-bool hasSeenMazeWall = false;
-bool allOpenTravel = false;
 bool drivingForward = false;
-unsigned long openForwardTimeMs = 0;
-unsigned long lastMotionUpdate = 0;
 bool tryingTRightBranch = false;
 bool enteredTRightBranch = false;
 bool returningToT = false;
@@ -364,7 +358,7 @@ void loop()
 
     case SCENARIO_DEAD_END_4:
       // The finish is a long dead end: stop for good if this one ends a long straight corridor
-      if (straightCorridorMs >= FINISH_CORRIDOR_MIN_MS)
+      if (straightCorridorMs >= (unsigned long)FINISH_CORRIDOR_MIN_CM * FORWARD_MS_PER_CM)
       {
         stopAtFinish();
         break;
@@ -459,13 +453,6 @@ bool closeToSide(int nearCm, int farCm, bool nearOpen)
 // The order of the checks matters: the first match wins
 int classifyScenario(const Readings &r)
 {
-  // A brief all-open reading can be a junction. Stop only before entering a
-  // maze or after travelling the clear-distance allowance without seeing walls.
-  if (mazeExitStopNeeded(r))
-  {
-    clearTBranchTrial();
-    return SCENARIO_UNKNOWN_0;
-  }
   bool frontInTurnRange = inRange(r.cmMiddle, TURN_FRONT_MIN_CM, TURN_FRONT_MAX_CM);
   bool closeLeft = closeToSide(r.cmLeft, r.cmRight, r.leftOpen);
   bool closeRight = closeToSide(r.cmRight, r.cmLeft, r.rightOpen);
@@ -595,7 +582,6 @@ bool stuckRecoveryNeeded(const Readings &r, int scenario)
 
 void drive(int leftMicros, int rightMicros)
 {
-  updateOpenTravelTime();
   updateStraightCorridorTime();
   drivingForward = leftMicros > LEFT_STOP && rightMicros < RIGHT_STOP;
   servoLeft.writeMicroseconds(leftMicros);
@@ -623,12 +609,6 @@ bool driveCentred()
 {
   Readings r = readSensors();
   noteCorridorWalls(r);
-  if (mazeExitStopNeeded(r))
-  {
-    showCode(SCENARIO_UNKNOWN_0);
-    stopRobot();
-    return false;
-  }
   if (r.cmMiddle < FRONT_CLEAR_MIN_CM)
   {
     stopRobot();
@@ -707,12 +687,6 @@ bool advanceToOpening()
   while (millis() - start < OPENING_FORWARD_TIME_MS)
   {
     Readings r = readSensors();
-    if (mazeExitStopNeeded(r))
-    {
-      showCode(SCENARIO_UNKNOWN_0);
-      stopRobot();
-      return false;
-    }
     if (r.cmMiddle <= OPENING_FRONT_STOP_CM)
     {
       stopRobot();
@@ -1417,23 +1391,8 @@ bool noWallsDetected(const Readings &r)
   return r.leftOpen && r.frontOpen && r.rightOpen;
 }
 
-// Account for motion between readings and across manoeuvres. Spins, reversing,
-// settling and serial output while stopped do not consume the travel allowance.
-void updateOpenTravelTime()
-{
-  unsigned long now = millis();
-  if (allOpenTravel && drivingForward)
-  {
-    unsigned long limit = (unsigned long)EXIT_CLEAR_TRAVEL_CM * FORWARD_MS_PER_CM;
-    unsigned long elapsed = now - lastMotionUpdate;
-    unsigned long remaining = limit - openForwardTimeMs;
-    openForwardTimeMs += min(elapsed, remaining);
-  }
-  lastMotionUpdate = now;
-}
-
-// Straight-corridor timer. Like the open-travel timer above, it only counts time while
-// the wheels are driving forward, here while the last reading saw both side walls.
+// Straight-corridor timer. It only counts time while the wheels are driving forward
+// and the last reading saw both side walls.
 // Called on every servo command (from drive()).
 void updateStraightCorridorTime()
 {
@@ -1474,20 +1433,6 @@ void stopAtFinish()
     Serial.print(straightCorridorMs);
     Serial.println(F(" ms of straight corridor, robot stopped"));
   }
-}
-
-bool mazeExitStopNeeded(const Readings &r)
-{
-  updateOpenTravelTime();
-  allOpenTravel = noWallsDetected(r);
-  if (!allOpenTravel)
-  {
-    hasSeenMazeWall = true;
-    openForwardTimeMs = 0;
-    return false;
-  }
-  return !hasSeenMazeWall ||
-    openForwardTimeMs >= (unsigned long)EXIT_CLEAR_TRAVEL_CM * FORWARD_MS_PER_CM;
 }
 
 Readings readSensorsStable()

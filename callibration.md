@@ -131,7 +131,7 @@ For the continuous-rotation servos:
 | `CORRIDOR_FORWARD_CM` | 5 cm | Normal driving step |
 | `OPENING_FORWARD_TIME_MS` | 760 ms | Maximum time spent creeping into an opening |
 | `OPENING_FRONT_STOP_CM` | 6 cm | Front-wall threshold during creeping |
-| `EXIT_CLEAR_TRAVEL_CM` | 15 cm | Distance travelled in open space before exit detection |
+| `FINISH_CORRIDOR_MIN_CM` | 40 cm | Straight walled corridor needed before a dead end counts as the finish. Set to about 1.5 tiles (see below). |
 | `STUCK_DETECT_TIME_MS` | 1500 ms | Time before stuck recovery triggers |
 
 Changing `TURN_TIME` also changes other movements that derive their durations from it, including the 180° turn, nudge turns, and alignment steps.
@@ -160,17 +160,28 @@ Changing `TURN_TIME` also changes other movements that derive their durations fr
 
 **Sensor limitation:** The sensors only return discrete zones, currently mapped to 2, 5, 8, 11, 14, and 17 cm. A threshold change only matters when it changes which zones satisfy a rule.
 
+### Setting the finish distance (`FINISH_CORRIDOR_MIN_CM`)
+
+The finish is always a long dead end. The robot stops for good when it reaches a dead end after driving at least `FINISH_CORRIDOR_MIN_CM` in a straight line with walls on both sides. Any other dead end makes it turn around instead.
+
+1. **Calibrate `FORWARD_MS_PER_CM` first.** The robot has no wheel sensors, so it measures distance as driving time, and this value converts between the two.
+2. **Measure one tile** in the lab, from post centre to post centre.
+3. **Set the value to about 1.5 tiles, not the full 2 tiles.** The robot counts less than the whole corridor. It only starts counting once it sees both side walls after entering the corridor, and the count restarts after every turn, including the after-turn tidy-up. It also stops before the end wall, as soon as the wall comes into range. So in a 2-tile finish it counts noticeably less than 2 tiles, and a setting of exactly 2 tiles would never be reached.
+4. **Check with the Serial Monitor.** Every debug line shows `straight ms`. Divide that by `FORWARD_MS_PER_CM` to get centimetres. Note the value just before the robot reaches the finish, and just before it reaches the longest ordinary dead end. Set `FINISH_CORRIDOR_MIN_CM` halfway between the two.
+
+**Warning:** this only works if no ordinary dead end is as long as the finish. If another dead end in the maze has an equally long straight corridor, the robot cannot tell them apart and may stop there.
+
 ---
 
 ## 5. What Each Case Does
 
 | Case | Behaviour | Main settings |
 |---|---|---|
-| 0 | Stop | `FRONT_CLEAR_MIN_CM`, `EXIT_CLEAR_TRAVEL_CM` |
+| 0 | Stop | `FRONT_CLEAR_MIN_CM` |
 | 1 | Drive down corridor | Wheel speeds, `CORRIDOR_FORWARD_CM`, `STEER_AMOUNT`, clearance thresholds |
 | 2 | Turn right | Opening settings, `TURN_TIME`, turn speed |
 | 3 | Turn left | Opening settings, `TURN_TIME`, turn speed |
-| 4 | Turn around at a dead end | `TURN_180_TIME`, derived from `TURN_TIME` |
+| 4 | Turn around at a dead end, or stop for good if it is the finish | `TURN_180_TIME` (derived from `TURN_TIME`), `FINISH_CORRIDOR_MIN_CM` |
 | 5 | Correct position away from the left wall | Nudge settings, `CENTRE_TOLERANCE_CM` |
 | 6 | Correct position away from the right wall | Nudge settings, `CENTRE_TOLERANCE_CM` |
 | 7 | Correct heading when pointing towards the left wall | Parallel alignment settings |
