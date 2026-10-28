@@ -65,7 +65,7 @@ const int STEER_AMOUNT = 15;
 const int LEFT_TURN_SPEED  = 1400; // anticlockwise
 const int RIGHT_TURN_SPEED = 1600; // clockwise
 const int TURN_TIME        = 580;
-const unsigned long OPENING_FORWARD_TIME_MS = 760;
+const unsigned long OPENING_FORWARD_TIME_MS = 720;
 // Allow the axle to approach the corner before spinning. This is deliberately
 // separate from the more conservative normal-forward threshold (10 cm).
 const int OPENING_FRONT_STOP_CM = 6;
