@@ -213,6 +213,22 @@ const float NUDGE_MAX_FORWARD_CM = 4.0;
 const int STARTUP_DELAY  = 2000;
 const int SETTLE_DELAY   = 300;
 
+// Time limit for the whole straighten-and-centre routine after a turn. Before each action
+// it checks the time left and skips anything that would not fit. With 1 s there is room
+// for a short heading check (about one wobble each way) but not for a sideways nudge
+// (about 2.2 s); raise it to about 2500 to allow one nudge.
+const unsigned long ALIGN_TIME_LIMIT_MS = 1000;
+// Pause after each wobble step so the reading is taken while stopped
+const unsigned long ALIGN_STEP_PAUSE_MS = 100;
+// Estimated time of one wobble step (spin, pause, one stable reading) and one sideways
+// nudge (two spins with their pauses, the longest diagonal drive, one reading)
+const unsigned long ALIGN_STEP_COST_MS = ALIGN_STEP_TIME + ALIGN_STEP_PAUSE_MS + 100;
+const unsigned long ALIGN_NUDGE_COST_MS = 2UL * (2 * SETTLE_DELAY + NUDGE_TURN_TIME) +
+                                          (unsigned long)(NUDGE_MAX_FORWARD_CM * FORWARD_MS_PER_CM) + 100;
+// true = alignment decisions use the median of three readings (more reliable, 0.2 s slower
+// each); false = one stable reading, so more of the routine fits in the time limit
+const bool ALIGN_THREE_READINGS = false;
+
 Servo servoLeft;
 Servo servoRight;
 
@@ -264,6 +280,8 @@ bool postTurnAlignRight = false;
 // on, higher indices are further in the turn direction
 int sweepTotal[ALIGN_SWEEP_SIZE];
 byte sweepCount[ALIGN_SWEEP_SIZE];
+// When the current straighten-and-centre routine must be finished (see ALIGN_TIME_LIMIT_MS)
+unsigned long alignDeadline = 0;
 // Straight-corridor timer (see updateStraightCorridorTime) and the finish stop
 unsigned long straightCorridorMs = 0;
 bool corridorBothWalls = false;
@@ -493,12 +511,19 @@ int classifyScenario(const Readings &r)
       return SCENARIO_CLOSE_RIGHT_6;
   }
 
-  // Prefer right if both sides open. Do not repeat for the same opening.
+  // Right-hand wall following at an opening: right first, then straight on, then left.
+  // - right open: turn right (unless it just turned here and can still go straight, so it
+  //   does not turn back into the opening it came from)
+  // - right is a wall but the front is clear: straight on, even if the left is open
+  // - right and front blocked: turn left
   if (r.leftOpen || r.rightOpen)
   {
-    if (openingTurnArmed)
-      return r.rightOpen ? SCENARIO_RIGHT_TURN_2 : SCENARIO_LEFT_TURN_3;
-    return r.cmMiddle > DEAD_END_MAX_CM ? SCENARIO_CORRIDOR_1 : SCENARIO_UNKNOWN_0;
+    bool frontClear = r.cmMiddle > DEAD_END_MAX_CM;
+    if (r.rightOpen && (openingTurnArmed || !frontClear))
+      return SCENARIO_RIGHT_TURN_2;
+    if (frontClear)
+      return SCENARIO_CORRIDOR_1;
+    return SCENARIO_LEFT_TURN_3; // right and front blocked, so the open side is the left
   }
 
   // During navigation the same 7/8 test applies. Side openings above retain
@@ -787,7 +812,11 @@ void rotateStep(int speed, int stepMs)
 // anticlockwise, so steps in both directions are the same size
 void alignStep(int speed)
 {
-  rotateStep(speed, ALIGN_STEP_TIME + (speed == LEFT_TURN_SPEED ? ALIGN_LEFT_STEP_EXTRA_MS : 0));
+  resetStraightCorridor();
+  drive(speed, speed);
+  waitMs(ALIGN_STEP_TIME + (speed == LEFT_TURN_SPEED ? ALIGN_LEFT_STEP_EXTRA_MS : 0));
+  stopRobot();
+  waitMs(ALIGN_STEP_PAUSE_MS);
 }
 
 void rotateSteps(int speed, int steps)
@@ -816,13 +845,28 @@ int median3(int a, int b, int c)
   return b;
 }
 
-// Used where a decision moves the robot: three stable readings, median per sensor
+// True if at least ms is left before the routine's time limit
+bool alignTimeLeft(unsigned long ms)
+{
+  return (long)(alignDeadline - millis()) >= (long)ms;
+}
+
+// Used where an alignment decision moves the robot: three stable readings combined
+// (median per sensor), or just one when ALIGN_THREE_READINGS is false
 SettledReadings readSensorsSettled()
 {
   Readings a = readSensorsStable();
+  SettledReadings s;
+  if (!ALIGN_THREE_READINGS)
+  {
+    s.r = a;
+    s.leftWall = !a.leftOpen;
+    s.rightWall = !a.rightOpen;
+    return s;
+  }
+
   Readings b = readSensorsStable();
   Readings c = readSensorsStable();
-  SettledReadings s;
 
   s.r.cmLeft = median3(a.cmLeft, b.cmLeft, c.cmLeft);
   s.r.cmMiddle = median3(a.cmMiddle, b.cmMiddle, c.cmMiddle);
@@ -987,9 +1031,13 @@ HeadingResult alignHeading(bool turnedRight)
   sweepCount[startIndex] = 1;
   int lowest10 = sweepAvg10(startIndex);
 
+  // Within the time limit: each step out is only taken if there is also time to come back
+  // past the start and look at the other side (steps out + 1 more back), so that whenever
+  // the robot wobbles out at all, both sides get checked.
   int index = startIndex;
   int rising = 0;
-  while (index < ALIGN_SWEEP_SIZE - 1 && rising < 2)
+  while (index < ALIGN_SWEEP_SIZE - 1 && rising < 2 &&
+         alignTimeLeft((unsigned long)(index - startIndex + 3) * ALIGN_STEP_COST_MS))
   {
     alignStep(turnSpeed);
     int reading10 = sampleSweep(++index, h);
@@ -999,7 +1047,7 @@ HeadingResult alignHeading(bool turnedRight)
   int hi = index;
 
   rising = 0;
-  while (index > 0 && rising < 2)
+  while (index > 0 && rising < 2 && alignTimeLeft(ALIGN_STEP_COST_MS))
   {
     alignStep(otherSpeed);
     int reading10 = sampleSweep(--index, h);
@@ -1088,6 +1136,11 @@ int centreBetweenWalls(bool &moved, const __FlashStringHelper *&reason)
       reason = F("front not clear, correction skipped");
       break;
     }
+    if (!alignTimeLeft(ALIGN_NUDGE_COST_MS))
+    {
+      reason = F("time limit, correction skipped");
+      break;
+    }
 
     bool completed = centringNudge(diff < 0, abs(diff));
     moved = true;
@@ -1122,8 +1175,9 @@ int centreBetweenWalls(bool &moved, const __FlashStringHelper *&reason)
 // is bounded. Leaves the motors stopped and the junction / branch flags untouched.
 void alignAfterTurn(bool turnedRight)
 {
+  alignDeadline = millis() + ALIGN_TIME_LIMIT_MS;
   stopRobot();
-  waitMs(SETTLE_DELAY);
+  waitMs(SETTLE_DELAY / 2); // the turn already settled; this covers the entry drive
 
   HeadingResult heading = alignHeading(turnedRight);
 
@@ -1135,7 +1189,7 @@ void alignAfterTurn(bool turnedRight)
   // directly (the sum of the sides does not change with sideways position); anything else
   // gets one more sweep.
   bool resweep = false;
-  if (moved)
+  if (moved && alignTimeLeft(3 * ALIGN_STEP_COST_MS))
   {
     bool stillAligned = heading.result == HEADING_ALIGNED && heading.useLeft && heading.useRight &&
                         headingVerified(readSensorsSettled(), heading);
@@ -1145,6 +1199,10 @@ void alignAfterTurn(bool turnedRight)
       resweep = true;
     }
   }
+
+  stopRobot();
+  if (!DEBUG_SENSORS)
+    return; // the rest only checks and prints the results
 
   // Final verification from fresh readings
   SettledReadings last = readSensorsSettled();
