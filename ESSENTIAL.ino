@@ -177,9 +177,12 @@ const int MISSION_MODE = 1;
 // reading with the robot in the middle of a corner, so it turns in the right place. MEASURE.
 const int MISSION_FRONT_STOP_CM = 8;
 
-// After a turn, drive into the new corridor until both side walls are seen (at most this
-// far), so the centring after the turn has two walls to centre between
-const int MISSION_ENTER_MAX_CM = 15;
+// After a turn, drive into the new corridor before straightening and centring: always at
+// least MISSION_ENTER_MIN_CM (unless a wall comes up ahead), then on until both side walls
+// are seen, but never more than MISSION_ENTER_MAX_CM. Going deeper keeps the side sensors
+// away from the junction, so the centring has two real walls to centre between.
+const int MISSION_ENTER_MIN_CM = 8;
+const int MISSION_ENTER_MAX_CM = 20;
 
 // At a wall with both sides open, turn right (true) or left (false)
 const bool MISSION_PREFER_RIGHT = true;
@@ -192,9 +195,16 @@ const int MISSION_MAX_TURNS = 20;
 // POST-TURN ALIGNMENT (safety bounds, not calibration)
 // ==========================================
 
-// Heading sweep: whole PARALLEL_STEP_TIME steps, at most this many either side of the
-// heading the turn finished on
-const int ALIGN_MAX_HEADING_STEPS = PARALLEL_MAX_TURN_TIME / PARALLEL_STEP_TIME;
+// Heading sweep step (the "wobble"). Its own value, separate from the code 7/8 step
+// (PARALLEL_STEP_TIME), which is shorter than one 20 ms servo update and so moves unevenly.
+const int ALIGN_STEP_TIME = TURN_TIME / 15; // 38 ms, about 6 degrees
+// Anticlockwise spins are weaker than clockwise ones (the right wheel runs 93 from its
+// stop instead of 107), so equal step times drift the robot clockwise over a sweep and it
+// ends up pointing right. Each anticlockwise step gets this much extra time to cancel it.
+// Still pointing right after the correction: raise it. Pointing left: lower it.
+const int ALIGN_LEFT_STEP_EXTRA_MS = 5;
+// Time limit of the sweep: at most this many steps either side of the turn's heading
+const int ALIGN_MAX_HEADING_STEPS = 3;
 const int ALIGN_SWEEP_SIZE = 2 * ALIGN_MAX_HEADING_STEPS + 1;
 // Lateral centring: most sideways corrections attempted after one turn
 const int ALIGN_MAX_CENTRE_SHIFTS = 2;
@@ -909,10 +919,17 @@ void rotateStep(int speed, int stepMs)
   waitMs(SETTLE_DELAY / 2);
 }
 
+// One heading-sweep step: ALIGN_STEP_TIME, plus ALIGN_LEFT_STEP_EXTRA_MS when turning
+// anticlockwise, so steps in both directions are the same size
+void alignStep(int speed)
+{
+  rotateStep(speed, ALIGN_STEP_TIME + (speed == LEFT_TURN_SPEED ? ALIGN_LEFT_STEP_EXTRA_MS : 0));
+}
+
 void rotateSteps(int speed, int steps)
 {
   for (int i = 0; i < steps; i++)
-    rotateStep(speed, PARALLEL_STEP_TIME);
+    alignStep(speed);
 }
 
 // ==========================================
@@ -1026,7 +1043,11 @@ bool findTrough(int lo, int hi, int step10, int &target, int &trough10, const __
     return false;
   }
 
+  // Middle of the stretch. With an even number of positions there are two middles: take
+  // the one nearer the turn's own heading, so the choice never favours left or right.
   target = (first + last) / 2;
+  if ((first + last) % 2 != 0 && target < ALIGN_MAX_HEADING_STEPS)
+    target++;
   return true;
 }
 
@@ -1106,7 +1127,7 @@ HeadingResult alignHeading(bool turnedRight)
   int rising = 0;
   while (index < ALIGN_SWEEP_SIZE - 1 && rising < 2)
   {
-    rotateStep(turnSpeed, PARALLEL_STEP_TIME);
+    alignStep(turnSpeed);
     int reading10 = sampleSweep(++index, h);
     lowest10 = min(lowest10, sweepAvg10(index));
     rising = reading10 >= lowest10 + h.step10 ? rising + 1 : 0;
@@ -1116,7 +1137,7 @@ HeadingResult alignHeading(bool turnedRight)
   rising = 0;
   while (index > 0 && rising < 2)
   {
-    rotateStep(otherSpeed, PARALLEL_STEP_TIME);
+    alignStep(otherSpeed);
     int reading10 = sampleSweep(--index, h);
     lowest10 = min(lowest10, sweepAvg10(index));
     rising = index < startIndex && reading10 >= lowest10 + h.step10 ? rising + 1 : 0;
@@ -1381,10 +1402,12 @@ bool followCorridorUntilWall()
   return false;
 }
 
-// Drives into the corridor just turned into, steering, until both side walls are seen
-// twice in a row, a wall comes up ahead, or MISSION_ENTER_MAX_CM has been driven
+// Drives into the corridor just turned into, steering. It always drives at least
+// MISSION_ENTER_MIN_CM, then stops once both side walls are seen twice in a row. A wall
+// coming up ahead stops it at any time, and it never drives more than MISSION_ENTER_MAX_CM.
 void enterNewCorridor()
 {
+  unsigned long minMs = (unsigned long)MISSION_ENTER_MIN_CM * FORWARD_MS_PER_CM;
   unsigned long maxMs = (unsigned long)MISSION_ENTER_MAX_CM * FORWARD_MS_PER_CM;
   unsigned long start = millis();
   int bothWalls = 0;
@@ -1396,7 +1419,7 @@ void enterNewCorridor()
       break;
     if (!r.leftOpen && !r.rightOpen)
     {
-      if (++bothWalls >= 2)
+      if (++bothWalls >= 2 && millis() - start >= minMs)
         break;
     }
     else
