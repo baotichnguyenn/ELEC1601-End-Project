@@ -71,9 +71,6 @@ const unsigned long OPENING_FORWARD_TIME_MS = 760;
 const int OPENING_FRONT_STOP_CM = 6;
 const int SIDE_CLEARANCE_MIN_CM = 6;
 
-// Scenario 9: recover after remaining trapped against a wall/corner.
-const unsigned long STUCK_DETECT_TIME_MS = 1500;
-
 // 180 degree turn
 const int TURN_180_TIME    = 2 * TURN_TIME;
 
@@ -108,7 +105,9 @@ const int TURN_FRONT_MAX_CM = 9;
 const int TURN_SIDE_MIN_CM = 0;
 const int TURN_SIDE_MAX_CM = 15;
 
-// Code 4: front, left and right readings all within (x, y)
+// Code 4: front, left and right readings all within (x, y). Corridor driving also keeps
+// going until the front reading is inside this range, so the robot drives right up to a
+// dead end (front reads 8 or less) and turns 180 there.
 const int DEAD_END_MIN_CM = 0;
 const int DEAD_END_MAX_CM = 10;
 
@@ -166,9 +165,16 @@ const int SCENARIO_T_JUNCTION_10  = 10; // FLASH FLASH OFF
 // POST-TURN ALIGNMENT (safety bounds, not calibration)
 // ==========================================
 
-// Heading sweep: whole PARALLEL_STEP_TIME steps, at most this many either side of the
-// heading the turn finished on
-const int ALIGN_MAX_HEADING_STEPS = PARALLEL_MAX_TURN_TIME / PARALLEL_STEP_TIME;
+// Heading sweep step (the "wobble"). Its own value, separate from the code 7/8 step
+// (PARALLEL_STEP_TIME), which is shorter than one 20 ms servo update and so moves unevenly.
+const int ALIGN_STEP_TIME = TURN_TIME / 15; // 38 ms, about 6 degrees
+// Anticlockwise spins are weaker than clockwise ones (the right wheel runs 93 from its
+// stop instead of 107), so equal step times drift the robot clockwise over a sweep and it
+// ends up pointing right. Each anticlockwise step gets this much extra time to cancel it.
+// Still pointing right after the correction: raise it. Pointing left: lower it.
+const int ALIGN_LEFT_STEP_EXTRA_MS = 5;
+// Time limit of the sweep: at most this many steps either side of the turn's heading
+const int ALIGN_MAX_HEADING_STEPS = 3;
 const int ALIGN_SWEEP_SIZE = 2 * ALIGN_MAX_HEADING_STEPS + 1;
 // Lateral centring: most sideways corrections attempted after one turn
 const int ALIGN_MAX_CENTRE_SHIFTS = 2;
@@ -193,7 +199,7 @@ const char *const CENTRE_RESULT_NAMES[] = { "NOT_APPLICABLE", "UNVERIFIED", "OFF
 
 const int FORWARD_MS_PER_CM   = 75;
 const int BACKWARD_MS_PER_CM  = 75;
-const int CORRIDOR_FORWARD_CM = 5; // Code 1: move 5 cm
+const int CORRIDOR_FORWARD_CM = 10; // Code 1: move 5 cm
 // Maze finish: the finish is always a long dead end. A dead end (code 4) reached after
 // driving at least this far straight between two side walls stops the robot for good.
 // Measured as forward-driving time and converted with FORWARD_MS_PER_CM. Set it to about
@@ -247,8 +253,6 @@ bool flashOn = false;
 unsigned long lastFlashToggle = 0;
 bool openingTurnArmed = true; // Rearm after both side walls are detected again.
 bool startingPositionPhase = true; // Codes 5/6 are only for initial alignment.
-bool hasCompletedForwardStep = false; // Keep reverse recovery disabled at startup.
-unsigned long stuckCandidateSince = 0;
 bool drivingForward = false;
 bool tryingTRightBranch = false;
 bool enteredTRightBranch = false;
@@ -325,8 +329,6 @@ void loop()
       enteredTRightBranch = true;
   }
   int scenario = classifyScenario(readings);
-  if (stuckRecoveryNeeded(readings, scenario))
-    scenario = SCENARIO_STUCK_9;
   if (DEBUG_SENSORS)
   {
     Serial.print(readings.cmLeft); Serial.print(' ');
@@ -392,11 +394,6 @@ void loop()
       clearTBranchTrial();
       if (rotateUntilParallel(LEFT_TURN_SPEED))
         startingPositionPhase = false;
-      break;
-
-    case SCENARIO_STUCK_9:
-      clearTBranchTrial();
-      recoverFromStuck();
       break;
 
     case SCENARIO_T_JUNCTION_10:
@@ -501,7 +498,7 @@ int classifyScenario(const Readings &r)
   {
     if (openingTurnArmed)
       return r.rightOpen ? SCENARIO_RIGHT_TURN_2 : SCENARIO_LEFT_TURN_3;
-    return r.cmMiddle >= FRONT_CLEAR_MIN_CM ? SCENARIO_CORRIDOR_1 : SCENARIO_UNKNOWN_0;
+    return r.cmMiddle > DEAD_END_MAX_CM ? SCENARIO_CORRIDOR_1 : SCENARIO_UNKNOWN_0;
   }
 
   // During navigation the same 7/8 test applies. Side openings above retain
@@ -513,6 +510,12 @@ int classifyScenario(const Readings &r)
   if (angledRight)
     return SCENARIO_ANGLED_RIGHT_8;
 
+  // 4 (wider corridor): wall ahead within the dead-end range and a wall on both sides,
+  // even if a side wall is further than DEAD_END_MAX_CM. Checked after 7/8 so a robot
+  // angled at one wall straightens up instead of turning around.
+  if (r.cmMiddle <= DEAD_END_MAX_CM && !r.leftOpen && !r.rightOpen)
+    return SCENARIO_DEAD_END_4;
+
   // 2: Right turn - front within (x, y), left within (x, y)
   if (frontInTurnRange && inRange(r.cmLeft, TURN_SIDE_MIN_CM, TURN_SIDE_MAX_CM) &&
       r.cmRight > r.cmLeft)
@@ -523,57 +526,13 @@ int classifyScenario(const Readings &r)
       r.cmLeft > r.cmRight)
     return SCENARIO_LEFT_TURN_3;
 
-  // 1: Initial side corrections have already been checked. Drive whenever
-  // the front is clear, with conservative side corrections in driveCentred().
-  if (r.cmMiddle >= FRONT_CLEAR_MIN_CM)
+  // 1: Initial side corrections have already been checked. Drive until the wall ahead is
+  // inside the dead-end range, with conservative side corrections in driveCentred().
+  if (r.cmMiddle > DEAD_END_MAX_CM)
     return SCENARIO_CORRIDOR_1;
 
   // 0: Anything else
   return SCENARIO_UNKNOWN_0;
-}
-
-// Scenario 9 is a recovery heuristic because the robot has no wheel encoders.
-// It activates only after a suspicious near-wall state persists long enough,
-// avoiding a recovery turn for one noisy sensor reading.
-bool stuckRecoveryNeeded(const Readings &r, int scenario)
-{
-  if (!hasCompletedForwardStep || noWallsDetected(r))
-  {
-    stuckCandidateSince = 0;
-    return false;
-  }
-  int sideDiff = r.cmLeft - r.cmRight;
-  bool veryCloseToSide = min(r.cmLeft, r.cmRight) <= ANGLED_NEAR_MAX_CM;
-  bool slowSteeringAgainstWall =
-    scenario == SCENARIO_CORRIDOR_1 && veryCloseToSide &&
-    abs(sideDiff) > STEER_TOLERANCE_CM;
-  bool recoveryScenario =
-    scenario == SCENARIO_UNKNOWN_0 ||
-    scenario == SCENARIO_CLOSE_LEFT_5 ||
-    scenario == SCENARIO_CLOSE_RIGHT_6 ||
-    scenario == SCENARIO_ANGLED_LEFT_7 ||
-    scenario == SCENARIO_ANGLED_RIGHT_8;
-  bool nearObstacle =
-    r.cmMiddle < FRONT_CLEAR_MIN_CM || veryCloseToSide;
-  bool suspicious = nearObstacle && (recoveryScenario || slowSteeringAgainstWall);
-
-  if (!suspicious)
-  {
-    stuckCandidateSince = 0;
-    return false;
-  }
-
-  if (stuckCandidateSince == 0)
-  {
-    stuckCandidateSince = millis();
-    return false;
-  }
-
-  if (millis() - stuckCandidateSince < STUCK_DETECT_TIME_MS)
-    return false;
-
-  stuckCandidateSince = 0;
-  return true;
 }
 
 // ==========================================
@@ -609,7 +568,8 @@ bool driveCentred()
 {
   Readings r = readSensors();
   noteCorridorWalls(r);
-  if (r.cmMiddle < FRONT_CLEAR_MIN_CM)
+  // Keep driving until the wall ahead is inside the dead-end range (8 cm or less)
+  if (r.cmMiddle <= DEAD_END_MAX_CM)
   {
     stopRobot();
     return false;
@@ -656,8 +616,6 @@ void moveForwardCm(int cm)
       return;
     updateLeds();
   }
-  if (cm > 0)
-    hasCompletedForwardStep = true;
 }
 
 void turnInPlace(int speed, int duration)
@@ -748,25 +706,6 @@ void turn180()
   turnInPlace(RIGHT_TURN_SPEED, TURN_180_TIME);
 }
 
-// Back away by one normal travel step using the existing distance calibration.
-// The next loop takes fresh readings and reuses scenarios 1-8 to choose a
-// correction, rather than imposing a recovery direction or turn angle.
-void recoverFromStuck()
-{
-  resetStraightCorridor();
-  stopRobot();
-  waitMs(SETTLE_DELAY);
-
-  moveBackward();
-  waitMs((unsigned long)CORRIDOR_FORWARD_CM * BACKWARD_MS_PER_CM);
-  stopRobot();
-  waitMs(SETTLE_DELAY);
-
-  startingPositionPhase = true;
-  openingTurnArmed = true;
-  stuckCandidateSince = 0;
-}
-
 // Codes 5 & 6: turn away from the near wall, drive towards the middle,
 // turn back to parallel, then reverse the along-corridor part of the move
 // to finish approximately level with the starting position.
@@ -844,10 +783,17 @@ void rotateStep(int speed, int stepMs)
   waitMs(SETTLE_DELAY / 2);
 }
 
+// One heading-sweep step: ALIGN_STEP_TIME, plus ALIGN_LEFT_STEP_EXTRA_MS when turning
+// anticlockwise, so steps in both directions are the same size
+void alignStep(int speed)
+{
+  rotateStep(speed, ALIGN_STEP_TIME + (speed == LEFT_TURN_SPEED ? ALIGN_LEFT_STEP_EXTRA_MS : 0));
+}
+
 void rotateSteps(int speed, int steps)
 {
   for (int i = 0; i < steps; i++)
-    rotateStep(speed, PARALLEL_STEP_TIME);
+    alignStep(speed);
 }
 
 // ==========================================
@@ -961,7 +907,11 @@ bool findTrough(int lo, int hi, int step10, int &target, int &trough10, const __
     return false;
   }
 
+  // Middle of the stretch. With an even number of positions there are two middles: take
+  // the one nearer the turn's own heading, so the choice never favours left or right.
   target = (first + last) / 2;
+  if ((first + last) % 2 != 0 && target < ALIGN_MAX_HEADING_STEPS)
+    target++;
   return true;
 }
 
@@ -1041,7 +991,7 @@ HeadingResult alignHeading(bool turnedRight)
   int rising = 0;
   while (index < ALIGN_SWEEP_SIZE - 1 && rising < 2)
   {
-    rotateStep(turnSpeed, PARALLEL_STEP_TIME);
+    alignStep(turnSpeed);
     int reading10 = sampleSweep(++index, h);
     lowest10 = min(lowest10, sweepAvg10(index));
     rising = reading10 >= lowest10 + h.step10 ? rising + 1 : 0;
@@ -1051,7 +1001,7 @@ HeadingResult alignHeading(bool turnedRight)
   rising = 0;
   while (index > 0 && rising < 2)
   {
-    rotateStep(otherSpeed, PARALLEL_STEP_TIME);
+    alignStep(otherSpeed);
     int reading10 = sampleSweep(--index, h);
     lowest10 = min(lowest10, sweepAvg10(index));
     rising = index < startIndex && reading10 >= lowest10 + h.step10 ? rising + 1 : 0;
@@ -1216,7 +1166,6 @@ void alignAfterTurn(bool turnedRight)
   }
 
   stopRobot();
-  stuckCandidateSince = 0; // time spent aligning is not time spent stuck
 
   if (DEBUG_SENSORS)
   {
