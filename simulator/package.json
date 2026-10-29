@@ -1,0 +1,36 @@
+{
+  "name": "elec1601-robot-sim",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-based simulator that compiles and runs the ELEC1601 maze robot's Arduino firmware against a simulated robot and maze",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run tests/unit",
+    "test:e2e": "vitest run tests/e2e",
+    "test:all": "vitest run",
+    "sim": "node scripts/sim-cli.ts"
+  },
+  "dependencies": {
+    "@codemirror/lang-cpp": "6.0.3",
+    "@codemirror/lint": "6.9.7",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@yowasp/clang": "22.0.0-git20542-10",
+    "codemirror": "6.0.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "typescript": "5.9.3",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}
