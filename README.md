@@ -26,6 +26,7 @@ for anyone (human or AI agent) modifying the code.
   - [T-junction strategy (code 10)](#t-junction-strategy-code-10)
   - [Stuck detection (code 9)](#stuck-detection-code-9)
   - [Maze-exit stop](#maze-exit-stop)
+  - [Post-turn alignment](#post-turn-alignment-after-codes-2-3-and-a-first-visit-10)
   - [Known behaviours and limitations](#known-behaviours-and-limitations)
 - [Part 2 — Configuration reference](#part-2--configuration-reference)
 - [Part 3 — Guide for modifying the code (humans and AI agents)](#part-3--guide-for-modifying-the-code-humans-and-ai-agents)
@@ -89,7 +90,9 @@ flowchart TD
     S3 --> L0{"CALIBRATION_MODE?"}
     L0 -- yes --> CAL["printCalibration(): print zones and cm<br/>every 200 ms, never move"] --> L0
     L0 -- no --> R["readSensorsStable() (~95 ms)"]
-    R --> ARM{"Both side walls seen?"}
+    R --> AL{"postTurnAlignPending?<br/>(set by the last turn)"}
+    AL -- yes --> ALIGN["alignAfterTurn(): heading, then centring<br/>no classification, junction flags untouched"] --> L0
+    AL -- no --> ARM{"Both side walls seen?"}
     ARM -- yes --> ARM2["openingTurnArmed = true<br/>(if trying a T branch: enteredTRightBranch = true)"] --> C
     ARM -- no --> C["classifyScenario() picks 0–8 or 10"]
     C --> ST{"stuckRecoveryNeeded()?"}
@@ -191,6 +194,8 @@ They fire from step 8 (an open side, while armed) or from steps 11/12 (both wall
 3. Spin 90° (code 2 clockwise, code 3 anticlockwise): 980 ms including the settles.
 4. `enterCorridorAfterTurn()`: one `moveForwardCm(5)` with all of code 1's checks, then **stop**.
 5. Total ≈ 2.1 s with the advance, or ≈ 1.4 s without it.
+6. Set `postTurnAlignPending`. The **next** `loop()` pass runs the
+   [post-turn alignment](#post-turn-alignment-after-codes-2-3-and-a-first-visit-10) instead of choosing a code.
 
 ### Code 4 — Dead end
 1. Set `startingPositionPhase = false`.
@@ -250,6 +255,142 @@ is parallel.
 so code 0 lasts until something changes, or until [stuck detection](#stuck-detection-code-9) converts it
 to code 9.
 
+## Post-turn alignment (after codes 2, 3 and a first-visit 10)
+
+Every successful 90° turn through `takeOpeningTurn()` (approach, the calibrated turn, then the existing 5 cm
+`enterCorridorAfterTurn()`) sets `postTurnAlignPending`. The **next** `loop()` pass clears the flag first and
+runs `alignAfterTurn()` instead of reading and classifying; the pass after that is normal again. So it runs
+**exactly once per turn**, and it can't hold off classification for more than one pass.
+
+The alignment pass does not:
+- classify, so the junction just taken can't be chosen again,
+- change `openingTurnArmed`, `enteredTRightBranch` or any T flag, so the T-branch memory survives,
+- run stuck detection; the stuck timer is reset at the end.
+
+The LEDs keep showing the turn's code. Alignment does **not** run after the 180° turn (code 4), the code 10
+return path (a straight drive), or codes 5–9.
+
+### Sequence
+
+1. **Stop and settle** (`SETTLE_DELAY`).
+2. **Heading** (`alignHeading`): sweep, choose, move, verify (below).
+3. **Centring** (`centreBetweenWalls`), if both side walls are reliable (below).
+4. **Re-check the heading** if centring moved the robot. A two-wall `ALIGNED` heading is checked directly from
+   fresh readings. Anything else (failed check, a one-wall reference, or a heading that wasn't `ALIGNED`)
+   gets **one** more full heading sweep.
+5. **Final verification** from fresh readings, which can downgrade either result. Then stop, and print one line.
+
+"Fresh readings" always means `readSensorsSettled()`: three `readSensorsStable()` calls, combined as the
+median per sensor. A side only counts as a **reliable wall** if it saw a wall in all three.
+
+### How heading is estimated
+
+**The quantity used.** A side sensor points square to the robot, so its beam meets a straight wall soonest when
+the robot is parallel to that wall. The more the robot is turned either way, the further the beam travels
+(about *d* / cos θ). Sweeping the heading therefore gives a **dip** in the side reading, and parallel is the
+middle of the dip.
+
+- **With both walls**, the two side readings are **added**.
+  - Each sensor sits ahead of or behind the turning centre, which shifts its own dip slightly to one side.
+    The left and right shifts point opposite ways, so adding them cancels the shift.
+  - Between parallel walls, L + R doesn't depend on sideways position. That's what lets step 4 re-check the
+    heading after centring.
+- **With one wall**, that sensor alone is used. This is lower confidence because its dip is shifted, and the
+  printout says "1 wall ref".
+- **The front sensor is not used for heading.** The old "front − sides" score is gone.
+
+**The sweep.**
+- The reference walls are the side(s) that are reliable walls in the starting settled reading. If there are
+  none, the result is `UNVERIFIED` ("no side wall seen reliably") and the robot doesn't rotate.
+- **Steps:** whole `PARALLEL_STEP_TIME` steps (19 ms, then `SETTLE_DELAY / 2` = 150 ms of stillness, then
+  one `readSensorsStable()`). The sweep is indexed −7 … +7 around the heading the turn finished on
+  (`ALIGN_MAX_HEADING_STEPS` = `PARALLEL_MAX_TURN_TIME / PARALLEL_STEP_TIME` = 7).
+- **Order:** first out in the turn direction, then back **through the start to the other side**, so **both
+  directions are always tested**. Positions passed twice are averaged.
+- **Early stop:** each side stops early once two positions in a row read at least **one zone** above the
+  lowest seen so far, meaning it has climbed out of the dip. One zone is the smallest gap in the reference
+  sensors' tables, 3 cm with the current tables.
+- **A reference wall reading "open"** at some position counts as its open table value, i.e. far away. That
+  matches the beam missing the wall at a large angle.
+
+**Choosing a heading (`findTrough`).** The robot accepts a heading only if the readings single one out:
+- The lowest-reading positions (within half a zone of the minimum) must form **one block**. Two separate low
+  stretches are ambiguous.
+- There must be a position **at least one full zone higher on both sides** of that block. A flat sweep, or
+  one that only falls or only rises, doesn't show where parallel is.
+- If both hold, the target is the **middle of the block**. If not, the robot rotates back to the start index
+  (keeping the calibrated turn's heading), and the result is `UNVERIFIED` with the reason.
+
+**Verifying.** After stepping to the target, a fresh settled reading must still see the reference wall(s), and
+its sum must be within half a zone of the dip's bottom. Then the result is `ALIGNED`; otherwise
+`NOT_ALIGNED` ("fresh readings above the dip"). Timed steps don't retrace exactly, which is why this check exists.
+
+### How centring is estimated and done
+
+- **Needs both side walls reliable** in the settled reading. Otherwise the result is `NOT_APPLICABLE` and
+  nothing moves.
+- **The estimate is L − R** from settled (median) readings. If |L − R| ≤ `CENTRE_TOLERANCE_CM` (6), the result
+  is `WITHIN_TOLERANCE`. That means within the sensors' resolution, not exactly centred.
+- **Otherwise, a correction** (`centringNudge`), at most `ALIGN_MAX_CENTRE_SHIFTS` (2) times, and only if the
+  front reads at least `FRONT_CLEAR_MIN_CM`:
+  1. Spin `NUDGE_TURN_TIME` away from the nearer wall.
+  2. Drive `nudgeForwardCm(|L − R|)`, the same size rule as codes 5/6 (1.5–4 cm), **checking the front
+     sensor before each ~10 ms of driving**. It stops at once if the front reads less than
+     `FRONT_CLEAR_MIN_CM`.
+  3. Spin back.
+  4. **It doesn't reverse.** There is no rear sensor, and behind the robot is the junction it has just left.
+     So the robot ends up to ~3.5 cm further into the corridor.
+- **After each correction** it takes fresh settled readings, and stops correcting if:
+  - a side wall was lost (`UNVERIFIED`),
+  - the front check cut the drive short,
+  - the difference didn't shrink,
+  - or the limit is reached.
+
+  The result is then `WITHIN_TOLERANCE` or `OFF_CENTRE` from the last readings.
+- **`shiftTowardsMiddle()` (codes 5/6) is unchanged.** Its size calculation was only moved into
+  `nudgeForwardCm()`, with identical maths.
+
+### Output
+
+With `DEBUG_SENSORS` on, each sweep prints its averaged readings per step, for example
+`heading sweep (step: avg cm): -2:19.0 -1:16.0 0:16.0 1:16.0 2:19.0 3:19.0`. The pass ends with:
+
+```
+align after right turn: heading ALIGNED (2 wall ref) | centre WITHIN_TOLERANCE (L 8 R 8)
+align after left turn: heading UNVERIFIED (1 wall ref, no dip with a rise on both sides) | centre NOT_APPLICABLE (L 8 R 17, both side walls not seen reliably)
+```
+
+### Bounds and time
+- **One sweep** is at most 21 reading steps (≈ 265 ms each) plus 14 return steps (≈ 170 ms each), plus two
+  settled readings. That's **≈ 9 s** worst case; usually a few seconds thanks to the early stop.
+- **Centring** is at most 2 corrections, ≈ 2.2 s each including the readings.
+- **At most 2 sweeps** per alignment. So the worst case for the whole pass is **≈ 23 s**: a flat sweep,
+  two corrections, and a second flat sweep.
+
+### What the three sensors can and cannot establish
+
+| Geometry after the turn | Heading | Centring |
+|---|---|---|
+| Both side walls visible | yes, if the heading error is big enough to change a zone (see below) | yes, within `CENTRE_TOLERANCE_CM` (a 6 cm L/R difference is ≈ 3 cm off centre) |
+| Narrow corridor (both walls ~2–5 cm) | yes, as above | the front check may stop the nudge early, because at the nudge angle the front sensor sees the far side wall |
+| One side wall visible | lower confidence (one-sensor bias) | `NOT_APPLICABLE` |
+| No side walls | `UNVERIFIED` | `NOT_APPLICABLE` |
+| A side wall that ends during the sweep (near a junction) | may be `UNVERIFIED`, or a wrong dip if the end happens to look like one | — |
+
+### Limitations
+- **Resolution.** Zones are 3 cm apart. A wall 8 cm away reads 8 / cos θ, which is still about 8.3 cm at
+  15°: the same zone. So small heading errors (roughly under 15–20°) don't produce a dip, and the honest
+  result is `UNVERIFIED`. Weaker reflections at an angle may help, but that hasn't been measured.
+- **Timed rotation.** `PARALLEL_STEP_TIME` (19 ms) is shorter than the servos' 20 ms pulse period, so a step
+  gets either zero or one turning pulse. Steps are uneven, the ±7 steps may cover much less than ±22°, and
+  moving back to a position isn't exact. The two turn speeds are also asymmetric (107 vs 93 µs from the right
+  wheel's stop). The settled verification after every move exists because of this. Improving it would mean
+  re-calibrating `PARALLEL_STEP_TIME`, which codes 7/8 share; that hasn't been done.
+- **Geometry assumptions:** straight walls, side sensors pointing straight left and right, and the robot
+  spinning about its centre.
+- **Noise.** A single misread can create or hide a dip. Median filtering, averaging repeated positions, the
+  one-zone rise rule and the settled verification limit this, but can't rule it out.
+
 ## Memory: the state flags
 
 The robot is not memoryless: these globals carry information between passes.
@@ -265,6 +406,7 @@ The robot is not memoryless: these globals carry information between passes.
 | `tryingTRightBranch` | false | code 10 first visit | `clearTBranchTrial()`, code 4 | robot is exploring the T's right branch |
 | `enteredTRightBranch` | false | `loop()` when both walls are seen while trying the branch | `clearTBranchTrial()`, code 4 | the branch has properly started |
 | `returningToT` | false | code 4 while trying the branch | `clearTBranchTrial()` | the next "left open, right walled, front clear" is the T |
+| `postTurnAlignPending`, `postTurnAlignRight` | false | a successful `takeOpeningTurn()` (and the direction it turned) | the next `loop()` pass | that pass runs `alignAfterTurn()` instead of classifying |
 | `shownCode`, `flashOn`, `lastFlashToggle` | 0/false/0 | `showCode`, `updateLeds` | — | LED display |
 
 `clearTBranchTrial()` (which clears the three T flags) runs on codes 2, 3, 7, 8, 9 and 10, on a maze-exit stop,
@@ -378,6 +520,19 @@ All tunables are `const` globals at the top of `ESSENTIAL.ino`.
 | `STUCK_DETECT_TIME_MS` | 1500 | 9 | how long a suspicious state must last |
 | `STARTUP_DELAY` | 5000 ms | setup | still, LEDs off |
 | `SETTLE_DELAY` | 200 ms | turns, shuffles, recovery | pause around every spin (half of it between 7/8 steps) |
+
+### Post-turn alignment (safety bounds, not calibration)
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `ALIGN_MAX_HEADING_STEPS` | `PARALLEL_MAX_TURN_TIME / PARALLEL_STEP_TIME` = 7 | sweep reach either side of the turn's heading |
+| `ALIGN_SWEEP_SIZE` | 2 × 7 + 1 = 15 | number of sweep positions |
+| `ALIGN_MAX_CENTRE_SHIFTS` | 2 | most sideways corrections after one turn |
+| `HEADING_*`, `CENTRE_*` (+ `*_RESULT_NAMES`) | — | result codes and their debug text |
+
+Alignment also uses `PARALLEL_STEP_TIME`, `SETTLE_DELAY`, both turn speeds, `FRONT_CLEAR_MIN_CM` (the front
+check during the nudge), `CENTRE_TOLERANCE_CM`, `NUDGE_ANGLE_DEG` / `NUDGE_TURN_TIME`, `NUDGE_MIN/MAX_FORWARD_CM`,
+the forward values and `FORWARD_MS_PER_CM`, and the zone tables (one zone of resolution).
 
 ### Decision thresholds (cm)
 
