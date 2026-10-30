@@ -15,8 +15,12 @@ export interface MazeSpec {
   description?: string;
   rows: number;
   cols: number;
-  /** Grid pitch: post centre to post centre */
+  /**
+   * Grid pitch: post centre to post centre = one floor tile + one post. The tile itself
+   * (tileMm - wallThicknessMm) is the clear corridor width; see tileLengthMm().
+   */
   tileMm: number;
+  /** Post size: the square block between tiles, and the walls on the same grid lines */
   wallThicknessMm: number;
   /** (rows + 1) x cols: wall on the top edge of cell (r, c); row `rows` is the bottom boundary */
   hWalls: boolean[][];
@@ -52,9 +56,22 @@ export function thetaToBearing(theta: number): number {
   return b;
 }
 
-export function corridorWidthMm(spec: MazeSpec): number {
+// Lab maze (measured): 20 cm floor tiles with 7 cm square posts between them. Corridors run
+// over the tiles, between walls on the post lines, so a corridor is always one tile wide.
+export const LAB_TILE_MM = 200;
+export const LAB_POST_MM = 70;
+
+/** Grid pitch (MazeSpec.tileMm) for a tile length and post size */
+export function pitchMm(tileLengthMm: number, postMm: number): number {
+  return tileLengthMm + postMm;
+}
+
+/** Floor tile length, which is also the clear corridor width between wall faces */
+export function tileLengthMm(spec: MazeSpec): number {
   return spec.tileMm - spec.wallThicknessMm;
 }
+
+export const corridorWidthMm = tileLengthMm;
 
 export function cellCentre(spec: MazeSpec, r: number, c: number): Vec {
   return { x: (c + 0.5) * spec.tileMm, y: (r + 0.5) * spec.tileMm };
@@ -88,7 +105,7 @@ export function cellKind(spec: MazeSpec, r: number, c: number): 'closed' | 'dead
 
 /** An empty maze: only the outer boundary walls. */
 export function createMaze(rows: number, cols: number, opts: Partial<Pick<MazeSpec, 'name' | 'tileMm' | 'wallThicknessMm'>> = {}): MazeSpec {
-  const tileMm = opts.tileMm ?? 250;
+  const tileMm = opts.tileMm ?? pitchMm(LAB_TILE_MM, LAB_POST_MM);
   const hWalls = Array.from({ length: rows + 1 }, (_, r) => Array.from({ length: cols }, () => r === 0 || r === rows));
   const vWalls = Array.from({ length: rows }, () => Array.from({ length: cols + 1 }, (_, c) => c === 0 || c === cols));
   return {
@@ -98,7 +115,7 @@ export function createMaze(rows: number, cols: number, opts: Partial<Pick<MazeSp
     rows,
     cols,
     tileMm,
-    wallThicknessMm: opts.wallThicknessMm ?? 12,
+    wallThicknessMm: opts.wallThicknessMm ?? LAB_POST_MM,
     hWalls,
     vWalls,
     wallOffsetsMm: {},
@@ -237,6 +254,15 @@ export function buildWorld(spec: MazeSpec): World {
       if (spec.vWalls[r][c] && spec.vWalls[r + 1][c] && o1 !== o2) add({ x: c * T + o1, y: (r + 1) * T }, { x: c * T + o2, y: (r + 1) * T }, t, [`v:${r}~${r + 1}:${c}`]);
     }
   (spec.extraWalls ?? []).forEach((w, i) => add({ x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 }, w.thicknessMm ?? t, [`x:${i}`]));
+  // Posts: a solid square block at every tile corner, whether or not a wall meets it (they
+  // stand at open junctions too, where the robot and its sensors can hit them)
+  for (let r = 0; r <= spec.rows; r++)
+    for (let c = 0; c <= spec.cols; c++) {
+      const a = { x: c * T - t / 2, y: r * T };
+      const b = { x: c * T + t / 2, y: r * T };
+      walls.push(segmentRect(a, b, t)); // not add(): that would lengthen the post by t
+      wallInfo.push({ ids: [`p:${r}:${c}`], a, b });
+    }
   const g = spec.goal;
   const goal = makePoly([
     { x: g.xMm, y: g.yMm },

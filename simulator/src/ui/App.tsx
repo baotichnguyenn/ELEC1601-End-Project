@@ -59,8 +59,8 @@ export default function App() {
   const [files, setFiles] = usePersistent<SourceFile[]>('files', repoSketch);
   const [active, setActive] = useState(files[0]?.name ?? '');
   const [overrides, setOverrides] = usePersistent<ParamOverrides>('overrides', () => ({}));
-  const [maze, setMazeRaw] = usePersistent<MazeSpec>('maze', () => presetById('advanced-2026'));
-  const [robot, setRobot] = usePersistent<RobotConfig>('robot', defaultRobotConfig);
+  const [maze, setMazeRaw] = usePersistent<MazeSpec>('maze.v2', () => presetById('advanced-2026')); // v2: 20 cm tiles + 7 cm posts
+  const [robot, setRobot] = usePersistent<RobotConfig>('robot.v2', defaultRobotConfig); // v2: 20 x 11 cm body
   const [settings, setSettings] = usePersistent<RunSettings>('settings', () => DEFAULT_SETTINGS);
   const [profiles, setProfiles] = usePersistent<Profile[]>('profiles', () => []);
   const [baseline, setBaseline] = usePersistent<SuiteSummary | null>('baseline', () => null);

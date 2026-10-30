@@ -1,10 +1,11 @@
 // Predefined test mazes. The synthetic ones are carved out of a fully walled grid; real
 // course mazes are given wall by wall. Goals are walled dead-end corridors (the finish
 // definition used by ESSENTIAL.ino), so "success" means the firmware stops inside that dead
-// end. Default geometry: 25 cm tiles (CELL_SIZE_CM in the firmware, marked MEASURE there)
-// and 1.2 cm walls (assumed) - change both to match the lab.
+// end. Geometry is the measured lab maze: 20 cm tiles (= corridor width) with 7 cm posts and
+// walls between them, i.e. a 27 cm grid pitch (LAB_TILE_MM / LAB_POST_MM in maze.ts).
 
-import { carvePath, createClosedMaze, setGoalCells, setStart, type Dir, type MazeSpec } from './maze.ts';
+import { carvePath, createClosedMaze, LAB_POST_MM, LAB_TILE_MM, pitchMm, setGoalCells, setStart, type Dir, type MazeSpec } from './maze.ts';
+import { defaultRobotConfig } from './robot.ts';
 
 interface PresetDef {
   id: string;
@@ -22,7 +23,6 @@ interface PresetDef {
   walls?: { h: string[]; v: string[] };
   start: { r: number; c: number; dir: Dir; lateralMm?: number; forwardMm?: number; headingOffsetDeg?: number };
   goal: [number, number][];
-  tileMm?: number;
   offsets?: Record<string, number>;
   extraWalls?: MazeSpec['extraWalls'];
 }
@@ -89,19 +89,8 @@ const DEFS: PresetDef[] = [
     goal: [[1, 4]],
   },
   {
-    id: 'narrow',
-    name: '7. Narrow corridors',
-    description: 'Layout of maze 2 with 22 cm tiles (20.8 cm clear). Spinning on the spot is tight for a long-tailed robot.',
-    rows: 3,
-    cols: 5,
-    paths: ['0,0 0,1 0,2 1,2 2,2 2,3 2,4'],
-    start: { r: 0, c: 0, dir: 'E' },
-    goal: [[2, 4]],
-    tileMm: 220,
-  },
-  {
     id: 'uneven',
-    name: '8. Uneven corridor widths',
+    name: '7. Uneven corridor widths',
     description: 'A straight run whose walls are shifted: wider in the middle, narrower near the end. Tests centring and the side-wall thresholds.',
     rows: 1,
     cols: 6,
@@ -112,7 +101,7 @@ const DEFS: PresetDef[] = [
   },
   {
     id: 'angled',
-    name: '9. Angled approach to a junction',
+    name: '8. Angled approach to a junction',
     description: 'The T-junction of maze 3, but the robot starts 15° off the corridor axis and 2.5 cm off centre.',
     rows: 3,
     cols: 4,
@@ -122,7 +111,7 @@ const DEFS: PresetDef[] = [
   },
   {
     id: 'false-junction',
-    name: '10. Long corridor that looks like a junction',
+    name: '9. Long corridor that looks like a junction',
     description: 'A long corridor with a two-tile-wide, one-tile-deep alcove on the right. The open side looks like a junction but leads nowhere.',
     rows: 2,
     cols: 7,
@@ -132,7 +121,7 @@ const DEFS: PresetDef[] = [
   },
   {
     id: 'recovery',
-    name: '11. Dead-end recovery',
+    name: '10. Dead-end recovery',
     description: 'The robot starts facing the closed end of a dead end. It must turn around and drive four tiles to the finish.',
     rows: 1,
     cols: 5,
@@ -142,7 +131,7 @@ const DEFS: PresetDef[] = [
   },
   {
     id: 'two-tile-exit',
-    name: '12. Two-tile exit after a 180° hairpin',
+    name: '11. Two-tile exit after a 180° hairpin',
     description:
       'Right, one tile, right again (a 180° hairpin) into the true finish: a two-tile walled dead end. A decoy corner leads to a one-tile dead end. Tests whether the finish is told apart from ordinary corners/dead ends reached after about one tile.',
     rows: 2,
@@ -153,11 +142,11 @@ const DEFS: PresetDef[] = [
   },
   {
     id: 'advanced-2026',
-    name: '13. 2026 S2 Advanced Maze',
+    name: '12. 2026 S2 Advanced Maze',
     description:
       'The 2026 Semester 2 advanced maze, transcribed from the course drawing. Finish: the two-cell walled dead end in the middle (row 3, columns 3-4), entered from the west. ' +
       'Also contains a two-cell dead-end column at the bottom edge (a look-alike that ends on the outer wall) and a closed two-cell pocket at the bottom right. ' +
-      'Start: bottom-left corner facing north (change it with the Start tool). Tile and wall sizes are not from the drawing: measure the lab maze.',
+      'Start: bottom-left corner facing north (change it with the Start tool). Tile and post sizes are the measured lab values (20 cm tiles, 7 cm posts).',
     rows: 6,
     cols: 6,
     walls: {
@@ -180,7 +169,7 @@ export interface Preset {
 }
 
 export function buildPreset(def: PresetDef): MazeSpec {
-  const m = createClosedMaze(def.rows, def.cols, { name: def.name, tileMm: def.tileMm ?? 250, wallThicknessMm: 12 });
+  const m = createClosedMaze(def.rows, def.cols, { name: def.name, tileMm: pitchMm(LAB_TILE_MM, LAB_POST_MM), wallThicknessMm: LAB_POST_MM });
   m.description = def.description;
   if (def.walls) {
     const bits = (s: string, n: number, what: string) => {
@@ -192,7 +181,12 @@ export function buildPreset(def: PresetDef): MazeSpec {
     m.vWalls = def.walls.v.map((s, r) => bits(s, def.cols + 1, `v[${r}]`));
   }
   for (const p of def.paths ?? []) carvePath(m, p);
-  setStart(m, def.start.r, def.start.c, def.start.dir, def.start);
+  // The start pose is the axle. Shift it so the whole body (not the axle) is centred on the
+  // start tile: a 20 cm robot fills a 20 cm tile, and with the axle near the front the tail
+  // would otherwise poke into the wall behind it.
+  const body = defaultRobotConfig().body;
+  const centreBodyMm = body.lengthMm / 2 - body.axleFromFrontMm;
+  setStart(m, def.start.r, def.start.c, def.start.dir, { ...def.start, forwardMm: (def.start.forwardMm ?? 0) + centreBodyMm });
   setGoalCells(m, def.goal.map(([r, c]) => ({ r, c })));
   if (def.offsets) m.wallOffsetsMm = { ...def.offsets };
   if (def.extraWalls) m.extraWalls = def.extraWalls;

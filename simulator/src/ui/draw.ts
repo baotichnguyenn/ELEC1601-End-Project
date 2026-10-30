@@ -2,7 +2,7 @@
 // recorded trace; it never influences the simulation (which runs in the worker).
 
 import { orientedRect, type Poly } from '../core/geometry.ts';
-import { cellCentre, corridorWidthMm, wallOffset, type CellClearance, type MazeSpec, type World } from '../core/maze.ts';
+import { cellCentre, corridorWidthMm, type CellClearance, type MazeSpec, type World } from '../core/maze.ts';
 import type { Pose } from '../core/physics.ts';
 import { interp, type RobotConfig } from '../core/robot.ts';
 import type { IrSensorSim } from '../core/sensors.ts';
@@ -339,54 +339,25 @@ const SANS = 'Inter, system-ui, "Segoe UI", sans-serif';
 const MONO = 'ui-monospace, "Cascadia Code", Consolas, monospace';
 
 /**
- * Tile markings: a post at every tile corner a wall reaches (so a long wall reads as a run
- * of one-tile segments, like the posts of the real maze), a small marker at corners in open
- * floor, row/column numbers matching the (r,c) cells in the event log, and a one-tile scale bar.
+ * Tile markings: the post at every tile corner (a real, solid part of the maze, drawn at
+ * its true size so it scales with zoom like the walls), row/column numbers matching the
+ * (r,c) cells in the event log, and a one-tile scale bar.
  */
 function drawTileMarks(ctx: CanvasRenderingContext2D, view: View, w: number, h: number, P: Palette, spec: MazeSpec): void {
   const T = spec.tileMm;
   const S = (x: number, y: number) => toScreen(view, w, h, x, y);
-  const key = (x: number, y: number) => `${x.toFixed(1)},${y.toFixed(1)}`;
-  // Wall end points at their real (possibly shifted) positions
-  const posts = new Map<string, [number, number]>();
-  const add = (x: number, y: number) => posts.set(key(x, y), [x, y]);
-  for (let r = 0; r <= spec.rows; r++)
-    for (let c = 0; c < spec.cols; c++)
-      if (spec.hWalls[r][c]) {
-        const off = wallOffset(spec, 'h', r, c);
-        add(c * T, r * T + off);
-        add((c + 1) * T, r * T + off);
-      }
-  for (let r = 0; r < spec.rows; r++)
-    for (let c = 0; c <= spec.cols; c++)
-      if (spec.vWalls[r][c]) {
-        const off = wallOffset(spec, 'v', r, c);
-        add(c * T + off, r * T);
-        add(c * T + off, (r + 1) * T);
-      }
   const tilePx = T * view.scale;
-  const side = Math.min(14, Math.max(6, spec.wallThicknessMm * 1.9 * view.scale));
+  const side = spec.wallThicknessMm * view.scale;
 
-  // Corners with no wall: hollow markers so the tile lattice stays visible in open floor
-  ctx.strokeStyle = P.grid;
-  ctx.lineWidth = 1;
-  const free = side * 0.6;
-  for (let r = 0; r <= spec.rows; r++)
-    for (let c = 0; c <= spec.cols; c++) {
-      if (posts.has(key(c * T, r * T))) continue;
-      const [x, y] = S(c * T, r * T);
-      ctx.strokeRect(x - free / 2, y - free / 2, free, free);
-    }
-
-  // Posts: separators between one-tile wall segments
   ctx.fillStyle = P.post;
   ctx.strokeStyle = P.postEdge;
   ctx.lineWidth = 1;
-  for (const [px, py] of posts.values()) {
-    const [x, y] = S(px, py);
-    ctx.fillRect(x - side / 2, y - side / 2, side, side);
-    ctx.strokeRect(x - side / 2 + 0.5, y - side / 2 + 0.5, side - 1, side - 1);
-  }
+  for (let r = 0; r <= spec.rows; r++)
+    for (let c = 0; c <= spec.cols; c++) {
+      const [x, y] = S(c * T, r * T);
+      ctx.fillRect(x - side / 2, y - side / 2, side, side);
+      if (side > 3) ctx.strokeRect(x - side / 2 + 0.5, y - side / 2 + 0.5, side - 1, side - 1);
+    }
 
   // Row and column numbers outside the maze
   if (tilePx >= 28) {
@@ -422,7 +393,7 @@ function drawTileMarks(ctx: CanvasRenderingContext2D, view: View, w: number, h: 
   ctx.stroke();
   ctx.fillStyle = P.text;
   ctx.font = `600 11px ${SANS}`;
-  ctx.fillText(`1 tile = ${(T / 10).toFixed(1)} cm (corridor ${(corridorWidthMm(spec) / 10).toFixed(1)} cm clear)`, x0, y0 - 9);
+  ctx.fillText(`${(T / 10).toFixed(1)} cm = ${(corridorWidthMm(spec) / 10).toFixed(1)} cm tile (corridor) + ${(spec.wallThicknessMm / 10).toFixed(1)} cm post`, x0, y0 - 9);
 }
 
 export function bodyPoly(robot: RobotConfig, pose: Pose): Poly {

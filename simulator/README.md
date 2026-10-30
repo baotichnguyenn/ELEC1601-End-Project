@@ -8,7 +8,7 @@ on the robot. There is no hand-written navigation algorithm anywhere in the simu
 - Build-time **parameter overrides** for any `const`/`#define` in the sketch (your files are never edited)
 - **Virtual clock**: `delay()` and `millis()` busy-waits never block the page; runs go about 200× faster than real time
 - **Deterministic**: same sketch + maze + robot model + seed → same trajectory
-- **Regression suite**: 12 synthetic test mazes plus the 2026 S2 advanced maze, repeated trials with sensor/motor variation, parameter sweeps, baselines
+- **Regression suite**: 11 synthetic test mazes plus the 2026 S2 advanced maze, repeated trials with sensor/motor variation, parameter sweeps, baselines
 - **Every physical default is labelled** as measured, derived from the firmware, or assumed
 
 ## Quick start
@@ -36,7 +36,7 @@ Then press **Run firmware**. The first compile loads the Clang toolchain (~105 M
 
 ```bash
 # The two-tile exit scenario, reactive mode, with the front-threshold fix, printing the event log
-npm run sim -- --maze mazes/12-two-tile-exit.maze.json --set GRID_MODE=false --set FRONT_CLEAR_MIN_CM=10 --events
+npm run sim -- --maze mazes/11-two-tile-exit.maze.json --set GRID_MODE=false --set FRONT_CLEAR_MIN_CM=10 --events
 # Every maze, 5 varied trials each, results to JSON (exit code 1 if any run fails)
 npm run sim -- --maze all --robustness --json results.json
 ```
@@ -46,7 +46,7 @@ npm run sim -- --maze all --robustness --json results.json
 | Tab | Purpose |
 |---|---|
 | **Firmware** | Upload `.ino`/`.h`/`.cpp` files (multi-file projects work as in the Arduino IDE), edit, compile. Errors appear inline and in *Build output* with the original file/line. Shows the Arduino API compatibility report and the exact translation unit Clang compiled. |
-| **Maze** | The 2026 S2 advanced maze (default) and 12 synthetic test mazes, or build your own: rows/cols, tile length, wall thickness, corridor width; click edges to toggle walls; set start (any heading, off-centre) and goal; shift individual walls (uneven corridors); add angled walls. Import/export JSON. Checks robot fit, spin clearance per cell, reachability. |
+| **Maze** | The 2026 S2 advanced maze (default) and 11 synthetic test mazes, or build your own: rows/cols, tile length (= corridor width, 20 cm in the lab) and post size (7 cm; a solid post stands at every tile corner); click edges to toggle walls; set start (any heading, off-centre) and goal; shift individual walls (uneven corridors); add angled walls. Import/export JSON. Checks robot fit, spin clearance per cell, reachability. |
 | **Robot** | The physical model: body, axle position, wheel track, servo neutral/sensitivity, speed curve, motor lag, noise, sensor poses and range tables. **Badges** show the source of each value. Includes a consistency check against the firmware's own calibration and tools that update the model from lab measurements. |
 | **Calibrate** | Every firmware constant, grouped by the section banners in your source, with derived values (`TURN_180_TIME = 2 * TURN_TIME = 1160`). Overrides are compiled into the next build. Save, load, export and compare **profiles** (overrides + robot model). |
 | **Tests** | Run the suite over selected mazes with N trials each (nominal or varied noise, battery, motor mismatch). Save a baseline and see per-scenario *improved / degraded*. Sweep one parameter over a range. Compare two profiles. Click any trial to replay it. |
@@ -139,9 +139,9 @@ Not used by the sketch, so not exercised: interrupts, `analogRead`/`analogWrite`
 
 ## Sample maze and reproducible end-to-end test
 
-- `mazes/12-two-tile-exit.maze.json`: the special exit case. A right turn, one tile, a right turn again (a 180°
+- `mazes/11-two-tile-exit.maze.json`: the special exit case. A right turn, one tile, a right turn again (a 180°
   hairpin) into the true finish, a **two-tile** walled dead end, plus a decoy corner leading to a **one-tile** dead
-  end. All test mazes are in `mazes/` as editable JSON, including `13-advanced-2026.maze.json` (the course maze, transcribed from the 2026 S2 drawing).
+  end. All test mazes are in `mazes/` as editable JSON, including `12-advanced-2026.maze.json` (the course maze, transcribed from the 2026 S2 drawing).
 - `tests/e2e/firmware.e2e.test.ts` compiles `tests/fixtures/ESSENTIAL.ino` (a snapshot of the committed sketch, so
   results don't change with your working copy) and checks, among others:
   - it compiles unmodified with no diagnostics and imports only simulator APIs;

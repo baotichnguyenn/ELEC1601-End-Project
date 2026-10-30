@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { cellCentre, corridorWidthMm, createMaze, parseMazeJson, resizeMaze, sweptRadiusMm, type MazeIssue, type MazeSpec } from '../../core/maze.ts';
+import { cellCentre, corridorWidthMm, createMaze, parseMazeJson, pitchMm, resizeMaze, sweptRadiusMm, tileLengthMm, type MazeIssue, type MazeSpec } from '../../core/maze.ts';
 import { PRESETS, presetById } from '../../core/presets.ts';
 import type { RobotConfig } from '../../core/robot.ts';
 import type { Edge } from '../draw.ts';
@@ -142,11 +142,10 @@ export function MazePanel({ maze, setMaze, tool, setTool, selectedEdge, issues, 
         <input type="number" min={1} max={30} value={cols} onChange={(e) => setCols(Number(e.target.value))} style={{ width: 56 }} /> cols
         <button className="btn small" disabled={rows === maze.rows && cols === maze.cols} onClick={() => setMaze(resizeMaze(maze, rows, cols))}>Apply</button>
       </div>
-      <Num label="Tile length (post centre to post centre)" value={maze.tileMm / 10} onChange={(v) => v > 5 && set({ tileMm: v * 10 })} />
-      <Num label="Wall thickness" value={maze.wallThicknessMm / 10} onChange={(v) => v > 0 && v * 10 < maze.tileMm && set({ wallThicknessMm: v * 10 })} />
-      <Num label="Corridor width (clear, between wall faces)" value={corridorWidthMm(maze) / 10} title="Changing this changes the tile length; the wall thickness is kept" onChange={(v) => v > 1 && set({ tileMm: v * 10 + maze.wallThicknessMm })} />
+      <Num label="Tile length (= corridor width)" value={tileLengthMm(maze) / 10} title="The floor tile between posts. Corridors are always exactly one tile wide." onChange={(v) => v > 5 && set({ tileMm: pitchMm(v * 10, maze.wallThicknessMm) })} />
+      <Num label="Post / wall size (between tiles)" value={maze.wallThicknessMm / 10} title="The square post between tiles; walls sit on the same lines. The tile length is kept." onChange={(v) => v > 0 && set({ tileMm: pitchMm(tileLengthMm(maze), v * 10), wallThicknessMm: v * 10 })} />
       <p className="note">
-        Maze outline {(maze.cols * maze.tileMm / 10).toFixed(1)} × {(maze.rows * maze.tileMm / 10).toFixed(1)} cm. Robot {(robot.body.widthMm / 10).toFixed(1)} cm wide → {((corridorWidthMm(maze) - robot.body.widthMm) / 20).toFixed(1)} cm each side when centred; spinning needs a {(swept / 10).toFixed(1)} cm radius about the axle.
+        Grid pitch (post centre to post centre) {(maze.tileMm / 10).toFixed(1)} cm. Maze outline {(maze.cols * maze.tileMm / 10).toFixed(1)} × {(maze.rows * maze.tileMm / 10).toFixed(1)} cm. Robot {(robot.body.widthMm / 10).toFixed(1)} cm wide → {((corridorWidthMm(maze) - robot.body.widthMm) / 20).toFixed(1)} cm each side when centred; spinning needs a {(swept / 10).toFixed(1)} cm radius about the axle.
       </p>
 
       <h2>Start pose (robot axle)</h2>

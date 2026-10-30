@@ -128,7 +128,7 @@ export function defaultRobotConfig(): RobotConfig {
     maxRangeMm: 400,
   });
   return {
-    body: { lengthMm: 140, widthMm: 110, axleFromFrontMm: 45 },
+    body: { lengthMm: 200, widthMm: 110, axleFromFrontMm: 45 },
     trackMm: 104,
     leftServo: { pin: 13, neutralUs: 1500, forwardSign: 1, usScale: 1, speedScale: 1, deadbandUs: 2 },
     rightServo: { pin: 12, neutralUs: 1493, forwardSign: -1, usScale: 65 / 70, speedScale: 1, deadbandUs: 2 },
@@ -169,8 +169,8 @@ function defaultProvenance(): Record<string, Provenance> {
   const assumed = (note: string): Provenance => ({ source: 'assumed', note });
   const firmware = (note: string): Provenance => ({ source: 'firmware', note });
   return {
-    'body.lengthMm': assumed('Placeholder for a BOE Shield-Bot-sized chassis. MEASURE: overall length including the tail wheel.'),
-    'body.widthMm': assumed('"~11 cm wide robot" (algorithm explanation.md). MEASURE: overall width across the wheels.'),
+    'body.lengthMm': { source: 'measured', note: 'Robot is 20 cm long (measured, overall).' },
+    'body.widthMm': { source: 'measured', note: 'Robot is 11 cm wide (measured, overall).' },
     'body.axleFromFrontMm': assumed('Placeholder. MEASURE: front edge to the wheel axle. Sets how far the tail swings when spinning.'),
     trackMm: assumed('Placeholder. MEASURE: centre-to-centre distance between the wheel contact points.'),
     'leftServo.pin': firmware('LEFT_SERVO_PIN = 13'),
