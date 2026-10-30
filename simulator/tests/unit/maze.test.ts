@@ -13,14 +13,30 @@ import {
   setGoalCells,
   thetaToBearing,
 } from '../../src/core/maze.ts';
+import { pointPolyDistance } from '../../src/core/geometry.ts';
 import { PRESETS } from '../../src/core/presets.ts';
 import { defaultRobotConfig } from '../../src/core/robot.ts';
 
 describe('maze model', () => {
-  it('an empty maze has merged boundary walls only', () => {
+  it('an empty maze has merged boundary walls plus a post at every tile corner', () => {
     const w = buildWorld(createMaze(3, 4));
-    expect(w.walls).toHaveLength(4); // top, bottom, left, right runs merged
-    expect(w.widthMm).toBe(1000);
+    const walls = w.wallInfo.filter((i) => !i.ids[0].startsWith('p:'));
+    expect(walls).toHaveLength(4); // top, bottom, left, right runs merged
+    expect(w.walls).toHaveLength(4 + 4 * 5); // (rows + 1) x (cols + 1) posts
+    expect(w.widthMm).toBe(4 * 270); // default grid pitch: 20 cm tile + 7 cm post
+  });
+
+  it('posts are solid 7 cm blocks even at an open crossroads', () => {
+    const m = createClosedMaze(3, 3);
+    carvePath(m, '1,0 1,1 1,2');
+    carvePath(m, '0,1 1,1 2,1');
+    const w = buildWorld(m);
+    // Corner (1,1) of the crossroads cell touches no wall, but its post is there
+    const i = w.wallInfo.findIndex((info) => info.ids[0] === 'p:1:1');
+    expect(i).toBeGreaterThanOrEqual(0);
+    const centre = { x: 270, y: 270 };
+    expect(pointPolyDistance(centre, w.walls[i])).toBe(0);
+    expect(pointPolyDistance({ x: 270 + 35 + 1, y: 270 }, w.walls[i])).toBeCloseTo(1, 6);
   });
 
   it('carving opens the shared edges and classifies cells', () => {
@@ -104,17 +120,25 @@ describe('maze model', () => {
 
   it('every preset is solvable and fits the default robot', () => {
     const robot = defaultRobotConfig();
-    expect(PRESETS).toHaveLength(13);
+    expect(PRESETS).toHaveLength(12);
     for (const p of PRESETS) {
       const { issues } = analyzeMaze(p.maze, robot.body);
       expect(issues.filter((i) => i.severity === 'error'), p.id).toEqual([]);
     }
   });
 
+  it('defaults to the lab geometry: 20 cm tiles (= corridor width) and 7 cm posts', () => {
+    const m = createMaze(1, 1);
+    expect(m.tileMm).toBe(270);
+    expect(m.wallThicknessMm).toBe(70);
+    for (const p of PRESETS) expect(p.maze.tileMm - p.maze.wallThicknessMm, p.id).toBe(200);
+  });
+
   it('flags cells too tight to spin in', () => {
+    // A 20 cm long robot cannot spin with its axle in the middle of a 20 cm corridor
     const robot = defaultRobotConfig();
-    const narrow = PRESETS.find((p) => p.id === 'narrow')!.maze;
-    const { clearance, issues } = analyzeMaze(narrow, robot.body);
+    const turns = PRESETS.find((p) => p.id === 'turns')!.maze;
+    const { clearance, issues } = analyzeMaze(turns, robot.body);
     expect(clearance.some((c) => !c.canSpin)).toBe(true);
     expect(issues.some((i) => /Spinning on the spot/.test(i.message))).toBe(true);
   });

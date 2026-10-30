@@ -6,7 +6,7 @@ import { essentialParser } from '../../src/core/serialParsers.ts';
 import { Simulation, type RunResult } from '../../src/core/simulation.ts';
 
 function manual(robot = defaultRobotConfig()) {
-  const sim = new Simulation({ maze: createMaze(2, 8, { tileMm: 500 }), robot, seed: 1, record: true, limits: { maxSimTimeS: 1e6, idleTimeoutS: 1e6, endOnStuck: false } });
+  const sim = new Simulation({ maze: createMaze(2, 8, { tileMm: 500, wallThicknessMm: 12 }), robot, seed: 1, record: true, limits: { maxSimTimeS: 1e6, idleTimeoutS: 1e6, endOnStuck: false } });
   sim.startManual();
   return sim;
 }

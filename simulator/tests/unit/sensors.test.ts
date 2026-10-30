@@ -8,7 +8,7 @@ import { avrToneFrequency, defaultRobotConfig, IR_SWEEP_ACTUAL_HZ } from '../../
 function frontSensorAt(distanceMm: number, angleDeg = 0, noise = 0) {
   const cfg = defaultRobotConfig();
   const model = { ...cfg.sensors[1], thresholdNoiseMm: noise };
-  const world = buildWorld(createMaze(1, 1, { tileMm: 600 }));
+  const world = buildWorld(createMaze(1, 1, { tileMm: 600, wallThicknessMm: 12 }));
   const s = new IrSensorSim(model, world, 7, 0);
   const pose = { x: 600 - 6 - 45 - distanceMm, y: 300, theta: (angleDeg * Math.PI) / 180 };
   return { s, pose };

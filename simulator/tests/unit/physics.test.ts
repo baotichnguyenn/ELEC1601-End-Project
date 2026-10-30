@@ -16,9 +16,10 @@ function drive(body: RobotBody, bus: ServoBus, cfg: RobotConfig, leftUs: number,
   return t;
 }
 
-function setup(cfg = defaultRobotConfig(), maze = createMaze(8, 8, { tileMm: 500 })) {
+function setup(cfg = defaultRobotConfig(), maze = createMaze(8, 8, { tileMm: 500, wallThicknessMm: 12 })) {
   const world = buildWorld(maze);
-  const body = new RobotBody(cfg, world, { x: 2000, y: 2000, theta: 0 }, 1);
+  // Cell centre of an open arena (tile corners hold solid posts)
+  const body = new RobotBody(cfg, world, { x: 2250, y: 2250, theta: 0 }, 1);
   const bus = new ServoBus();
   bus.attach(0, cfg.leftServo.pin, cfg.leftServo.neutralUs, 0);
   bus.attach(1, cfg.rightServo.pin, cfg.rightServo.neutralUs, 0);
@@ -43,9 +44,9 @@ describe('differential drive', () => {
     const { cfg, body, bus } = setup();
     let t = drive(body, bus, cfg, 1570, 1428, 2000, 0);
     t = drive(body, bus, cfg, 1500, 1493, 500, t); // stop and let it settle
-    expect(body.pose.x - 2000).toBeGreaterThan(255);
-    expect(body.pose.x - 2000).toBeLessThan(275);
-    expect(Math.abs(body.pose.y - 2000)).toBeLessThan(1);
+    expect(body.pose.x - 2250).toBeGreaterThan(255);
+    expect(body.pose.x - 2250).toBeLessThan(275);
+    expect(Math.abs(body.pose.y - 2250)).toBeLessThan(1);
   });
 
   it('a TURN_TIME = 580 ms spin at RIGHT_TURN_SPEED turns ~90 deg clockwise, measured at rest', () => {
@@ -56,7 +57,7 @@ describe('differential drive', () => {
     expect(deg).toBeGreaterThan(85);
     expect(deg).toBeLessThan(95);
     // Spinning on the spot: the axle hardly moves
-    expect(Math.hypot(body.pose.x - 2000, body.pose.y - 2000)).toBeLessThan(1);
+    expect(Math.hypot(body.pose.x - 2250, body.pose.y - 2250)).toBeLessThan(1);
   });
 
   it('left spins differ from right spins because RIGHT_STOP is 1493 (asymmetric offsets)', () => {
@@ -109,7 +110,7 @@ describe('collisions', () => {
   it('a robot driven into a wall stops at the wall surface and never passes through', () => {
     const cfg = defaultRobotConfig();
     cfg.speedCurve.mmps = cfg.speedCurve.mmps.map((v) => v * 10); // 1.3 m/s: well above the real robot
-    const maze = createMaze(1, 2, { tileMm: 500 });
+    const maze = createMaze(1, 2, { tileMm: 500, wallThicknessMm: 12 });
     const world = buildWorld(maze);
     const body = new RobotBody(cfg, world, { x: 250, y: 250, theta: 0 }, 1);
     const bus = new ServoBus();
@@ -134,7 +135,7 @@ describe('collisions', () => {
 
   it('classifies a spin that swings the tail into a side wall as a rear corner contact', () => {
     const cfg = defaultRobotConfig();
-    const maze = createMaze(1, 4, { tileMm: 250 });
+    const maze = createMaze(1, 4, { tileMm: 250, wallThicknessMm: 12 });
     const world = buildWorld(maze);
     // Axle 3 cm off the centreline towards the top wall; spin clockwise
     const body = new RobotBody(cfg, world, { x: 500, y: 95, theta: 0 }, 1);
