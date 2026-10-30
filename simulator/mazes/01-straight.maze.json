@@ -4,8 +4,8 @@
  "name": "1. Straight corridor",
  "rows": 1,
  "cols": 5,
- "tileMm": 250,
- "wallThicknessMm": 12,
+ "tileMm": 270,
+ "wallThicknessMm": 70,
  "hWalls": [
   [
    true,
@@ -35,15 +35,15 @@
  "wallOffsetsMm": {},
  "extraWalls": [],
  "start": {
-  "xMm": 125,
-  "yMm": 125,
+  "xMm": 190,
+  "yMm": 135,
   "headingDeg": 90
  },
  "goal": {
-  "xMm": 1000,
+  "xMm": 1080,
   "yMm": 0,
-  "wMm": 250,
-  "hMm": 250
+  "wMm": 270,
+  "hMm": 270
  },
  "description": "Five tiles straight ahead into a dead end. The firmware should drive straight, centred, and stop for good at the end (long walled corridor = finish)."
 }

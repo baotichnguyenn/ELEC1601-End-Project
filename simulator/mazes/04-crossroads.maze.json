@@ -4,8 +4,8 @@
  "name": "4. Cross intersection",
  "rows": 5,
  "cols": 3,
- "tileMm": 250,
- "wallThicknessMm": 12,
+ "tileMm": 270,
+ "wallThicknessMm": 70,
  "hWalls": [
   [
    true,
@@ -73,15 +73,15 @@
  "wallOffsetsMm": {},
  "extraWalls": [],
  "start": {
-  "xMm": 375,
-  "yMm": 1125,
+  "xMm": 405,
+  "yMm": 1160,
   "headingDeg": 0
  },
  "goal": {
-  "xMm": 250,
+  "xMm": 270,
   "yMm": 0,
-  "wMm": 250,
-  "hMm": 250
+  "wMm": 270,
+  "hMm": 270
  },
  "description": "A four-way crossing. Left and right are one-tile dead ends, straight on is the two-tile finish."
 }

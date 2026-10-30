@@ -1,11 +1,11 @@
 {
  "format": "elec1601-maze",
  "version": 1,
- "name": "8. Uneven corridor widths",
+ "name": "7. Uneven corridor widths",
  "rows": 1,
  "cols": 6,
- "tileMm": 250,
- "wallThicknessMm": 12,
+ "tileMm": 270,
+ "wallThicknessMm": 70,
  "hWalls": [
   [
    true,
@@ -42,15 +42,15 @@
  },
  "extraWalls": [],
  "start": {
-  "xMm": 125,
-  "yMm": 125,
+  "xMm": 190,
+  "yMm": 135,
   "headingDeg": 90
  },
  "goal": {
-  "xMm": 1250,
+  "xMm": 1350,
   "yMm": 0,
-  "wMm": 250,
-  "hMm": 250
+  "wMm": 270,
+  "hMm": 270
  },
  "description": "A straight run whose walls are shifted: wider in the middle, narrower near the end. Tests centring and the side-wall thresholds."
 }

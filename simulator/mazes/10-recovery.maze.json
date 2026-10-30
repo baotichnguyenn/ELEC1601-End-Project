@@ -1,11 +1,11 @@
 {
  "format": "elec1601-maze",
  "version": 1,
- "name": "11. Dead-end recovery",
+ "name": "10. Dead-end recovery",
  "rows": 1,
  "cols": 5,
- "tileMm": 250,
- "wallThicknessMm": 12,
+ "tileMm": 270,
+ "wallThicknessMm": 70,
  "hWalls": [
   [
    true,
@@ -35,15 +35,15 @@
  "wallOffsetsMm": {},
  "extraWalls": [],
  "start": {
-  "xMm": 125,
-  "yMm": 125,
+  "xMm": 80,
+  "yMm": 135,
   "headingDeg": 270
  },
  "goal": {
-  "xMm": 1000,
+  "xMm": 1080,
   "yMm": 0,
-  "wMm": 250,
-  "hMm": 250
+  "wMm": 270,
+  "hMm": 270
  },
  "description": "The robot starts facing the closed end of a dead end. It must turn around and drive four tiles to the finish."
 }

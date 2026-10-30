@@ -4,8 +4,8 @@
  "name": "3. T-junction",
  "rows": 3,
  "cols": 4,
- "tileMm": 250,
- "wallThicknessMm": 12,
+ "tileMm": 270,
+ "wallThicknessMm": 70,
  "hWalls": [
   [
    true,
@@ -58,15 +58,15 @@
  "wallOffsetsMm": {},
  "extraWalls": [],
  "start": {
-  "xMm": 625,
-  "yMm": 625,
+  "xMm": 675,
+  "yMm": 620,
   "headingDeg": 0
  },
  "goal": {
   "xMm": 0,
   "yMm": 0,
-  "wMm": 250,
-  "hMm": 250
+  "wMm": 270,
+  "hMm": 270
  },
  "description": "A stem into a T. The right branch is a one-tile dead end; the left branch is the two-tile finish. Exercises the code 10 \"try right, come back, go straight\" strategy."
 }
