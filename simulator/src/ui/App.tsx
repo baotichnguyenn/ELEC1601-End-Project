@@ -320,6 +320,7 @@ export default function App() {
     setMaze({ ...maze, extraWalls: [...(maze.extraWalls ?? []), { x1: pendingPoint.x, y1: pendingPoint.y, x2: x, y2: y, thicknessMm: maze.wallThicknessMm }] });
     setPendingPoint(null);
   };
+  const onStartMove = (x: number, y: number) => setMaze({ ...maze, start: { ...maze.start, xMm: x, yMm: y } });
 
   const trialSettings: TrialSettings = {
     limits: { maxSimTimeS: settings.maxSimTimeS, idleTimeoutS: settings.idleTimeoutS, stuckWindowS: settings.stuckWindowS, endOnStuck: settings.endOnStuck },
@@ -434,6 +435,7 @@ export default function App() {
             onEdge={onEdge}
             onCell={onCell}
             onPoint={onPoint}
+            onStartMove={onStartMove}
             banner={manual ? <ManualControls manual={manual} setManual={setManual} values={values} robot={robot} /> : null}
           />
           <Playback trace={trace} traceVersion={traceVersion} tMs={tMs} setT={(t) => { setTMs(t); setHighlight(null); }} playing={playing} setPlaying={setPlaying} speed={speed} setSpeed={setSpeed} onStepEvent={stepEvent} />

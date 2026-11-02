@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cellAt, type CellClearance, type World } from '../../core/maze.ts';
+import { pointInConvex } from '../../core/geometry.ts';
+import { cellAt, cellCentre, type CellClearance, type World } from '../../core/maze.ts';
 import type { RobotConfig } from '../../core/robot.ts';
 import { IrSensorSim } from '../../core/sensors.ts';
 import type { SimEvent } from '../../core/simulation.ts';
-import { drawScene, fitView, pickEdge, toWorld, type Edge, type Layers, type View } from '../draw.ts';
+import { bodyPoly, drawScene, fitView, pickEdge, toWorld, type Edge, type Layers, type View } from '../draw.ts';
 import type { Trace } from '../trace.ts';
 
 export type EditTool = 'none' | 'walls' | 'start' | 'goal' | 'offset' | 'angled';
@@ -25,6 +26,7 @@ interface Props {
   onEdge: (e: Edge) => void;
   onCell: (cell: { r: number; c: number }, shift: boolean) => void;
   onPoint: (x: number, y: number) => void;
+  onStartMove: (x: number, y: number) => void;
   banner?: React.ReactNode;
 }
 
@@ -46,9 +48,16 @@ export function Viewport(p: Props) {
   const [hoverEdge, setHoverEdge] = useState<Edge | null>(null);
   const [hoverCell, setHoverCell] = useState<{ r: number; c: number } | null>(null);
   const [mouse, setMouse] = useState<[number, number] | null>(null);
-  const drag = useRef<{ x: number; y: number; cx: number; cy: number; moved: boolean } | null>(null);
+  const [hoverStart, setHoverStart] = useState(false);
+  // grab = offset from the pointer to the start axle when dragging the start pose
+  const drag = useRef<{ x: number; y: number; cx: number; cy: number; moved: boolean; grab?: { dx: number; dy: number } } | null>(null);
   const sensors = useMemo(() => p.robot.sensors.map((m, i) => new IrSensorSim(m, p.world, 0, i)), [p.robot, p.world]);
   const editing = p.tool !== 'none';
+  // Same condition drawScene uses to show the start pose marker
+  const startVisible = !p.trace || p.frame < 0 || editing;
+  const start = p.world.spec.start;
+  const onStartPose = (wx: number, wy: number) =>
+    startVisible && pointInConvex({ x: wx, y: wy }, bodyPoly(p.robot, { x: start.xMm, y: start.yMm, theta: ((start.headingDeg - 90) * Math.PI) / 180 }));
   const dims = `${p.world.widthMm}x${p.world.heightMm}`;
 
   useEffect(() => {
@@ -111,6 +120,10 @@ export function Viewport(p: Props) {
     if (!view) return;
     (e.target as Element).setPointerCapture(e.pointerId);
     drag.current = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy, moved: false };
+    if (e.button === 0) {
+      const [wx, wy] = worldAt(e);
+      if (onStartPose(wx, wy)) drag.current.grab = { dx: start.xMm - wx, dy: start.yMm - wy };
+    }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -118,6 +131,16 @@ export function Viewport(p: Props) {
     const [wx, wy] = worldAt(e);
     setMouse([wx, wy]);
     const d = drag.current;
+    if (d?.grab && e.buttons & 1) {
+      d.moved = true;
+      const x = Math.min(p.world.widthMm, Math.max(0, wx + d.grab.dx));
+      const y = Math.min(p.world.heightMm, Math.max(0, wy + d.grab.dy));
+      // Shift snaps the axle to the centre of the cell under it
+      const cell = e.shiftKey ? cellAt(p.world.spec, x, y) : null;
+      const at = cell ? cellCentre(p.world.spec, cell.r, cell.c) : { x: Math.round(x), y: Math.round(y) };
+      if (at.x !== start.xMm || at.y !== start.yMm) p.onStartMove(at.x, at.y);
+      return;
+    }
     if (d && (e.buttons & 1 || e.buttons & 4)) {
       const dx = e.clientX - d.x;
       const dy = e.clientY - d.y;
@@ -125,6 +148,7 @@ export function Viewport(p: Props) {
       if (d.moved) setView({ ...view, cx: d.cx - dx / view.scale, cy: d.cy - dy / view.scale });
       return;
     }
+    setHoverStart(onStartPose(wx, wy));
     if (p.tool === 'walls' || p.tool === 'offset') setHoverEdge(pickEdge(p.world, wx, wy));
     if (p.tool === 'start' || p.tool === 'goal') setHoverCell(cellAt(p.world.spec, wx, wy));
   };
@@ -154,9 +178,10 @@ export function Viewport(p: Props) {
         onPointerLeave={() => {
           setHoverEdge(null);
           setHoverCell(null);
+          setHoverStart(false);
           setMouse(null);
         }}
-        style={{ cursor: editing ? 'crosshair' : 'grab' }}
+        style={{ cursor: drag.current?.grab ? 'grabbing' : hoverStart ? 'move' : editing ? 'crosshair' : 'grab' }}
       />
       <div className="overlay">
         {LAYER_LABELS.map(([k, label]) => (
