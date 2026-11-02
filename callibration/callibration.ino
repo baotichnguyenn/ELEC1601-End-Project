@@ -43,7 +43,7 @@ void setup()
   servoRight.writeMicroseconds(RIGHT_STOP);
 }
 
-void loop()
+void loop() 
 {
   // Nothing: the robot stays stopped until reset
 }
