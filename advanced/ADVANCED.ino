@@ -595,10 +595,10 @@ void stopRobot()
 }
 
 // Drives forward one step, steering towards the corridor centre
-// when walls are visible on both sides
-bool driveCentred()
+// when walls are visible on both sides. r returns the reading it used.
+bool driveCentred(Readings &r)
 {
-  Readings r = readSensors();
+  r = readSensors();
   noteCorridorWalls(r);
   // Keep driving until the wall ahead is inside the dead-end range (8 cm or less)
   if (r.cmMiddle <= DEAD_END_MAX_CM)
@@ -636,16 +636,30 @@ bool driveCentred()
   return true;
 }
 
-// Drives a set distance, staying centred
+// Drives a set distance, staying centred. Ends early once two readings in a row see a
+// right opening the robot would turn into, so the approach in advanceToOpening() always
+// starts from about the opening's edge. A left opening alone does not end it: with the
+// front clear the robot goes straight there anyway.
 void moveForwardCm(int cm)
 {
   unsigned long duration = (unsigned long)cm * FORWARD_MS_PER_CM;
   unsigned long start = millis();
+  int openReadings = 0;
 
   while (millis() - start < duration)
   {
-    if (!driveCentred())
+    Readings r;
+    if (!driveCentred(r))
       return;
+    if (openingTurnArmed && !returningToJunction && r.rightOpen)
+    {
+      if (++openReadings >= 2)
+        return;
+    }
+    else
+    {
+      openReadings = 0;
+    }
     updateLeds();
   }
 }
