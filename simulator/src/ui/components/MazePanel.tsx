@@ -17,9 +17,9 @@ interface Props {
 }
 
 const TOOLS: [EditTool, string, string][] = [
-  ['none', 'Pan', 'Drag to pan, wheel to zoom'],
+  ['none', 'Pan', 'Drag to pan, wheel to zoom. Drag the start robot to move it (hold Shift to snap to a cell centre)'],
   ['walls', 'Walls', 'Click a grid edge to add or remove a wall'],
-  ['start', 'Start', 'Click a cell to put the start (axle) at its centre'],
+  ['start', 'Start', 'Click a cell to put the start (axle) at its centre, or drag the robot to place it freely (Shift snaps)'],
   ['goal', 'Goal', 'Click a cell to make it the goal; shift-click to extend the goal region'],
   ['offset', 'Shift wall', 'Click a wall, then set how far it is shifted (uneven corridors)'],
   ['angled', 'Angled wall', 'Click two points to add a free wall segment'],
@@ -149,6 +149,7 @@ export function MazePanel({ maze, setMaze, tool, setTool, selectedEdge, issues, 
       </p>
 
       <h2>Start pose (robot axle)</h2>
+      <p className="note">Drag the robot in the view to move it, or type exact coordinates below.</p>
       <Num label="x" value={maze.start.xMm / 10} onChange={(v) => set({ start: { ...maze.start, xMm: v * 10 } })} />
       <Num label="y (down)" value={maze.start.yMm / 10} onChange={(v) => set({ start: { ...maze.start, yMm: v * 10 } })} />
       <Num label="Heading (0 = up, 90 = right)" unit="°" step={1} value={maze.start.headingDeg} onChange={(v) => set({ start: { ...maze.start, headingDeg: v } })} />
