@@ -1,164 +1,144 @@
-# Maze Robot Navigation Algorithm — Right-Hand Priority with Junction Left-First Trial
+# Maze Robot Navigation Algorithm — Trémaux Explorer on a Cell Grid
 
 This document describes the logic implemented in `advanced.ino`. If the two disagree, `advanced.ino` is the reference.
 
 ## 1. Objective
 
-The robot navigates a maze using three IR distance sensors (`FRONT`, `LEFT`, `RIGHT`).
+The robot explores the maze cell by cell using **Trémaux's algorithm**, builds its own map as it goes, and stops in the finish: a walled dead-end corridor at least two cells long whose end wall is an inside wall. The target maze is `simulator/mazes/12-advanced-2026.maze.json` (finish: cells 22–23, entered from the west; decoy: the two-cell dead end 44–54 on the outer wall).
 
-It follows a **right-hand priority strategy**. At a T-junction or crossroads it tries the left branch first. If that branch is a simple short dead end, the robot turns around and goes straight back through the junction.
+## 2. Why a grid, and not "turn when a side opens"
 
-## 2. Sensor Definitions
+The previous version reacted to openings: as soon as a side sensor saw a gap it drove a short timed distance and turned. The turn point therefore depended on when the sensor first saw the gap, which is before the robot is centred in the junction cell ("turns too early"). It also kept no memory of where it had been, so it could not apply Trémaux at all.
 
-| Term | Meaning |
+Now every decision is made with the robot stopped in the middle of a cell:
+
+1. Read left, front and right (median of three sweeps).
+2. Record those three sides on the map.
+3. Decide (Section 5).
+4. Turn if needed, then drive exactly one cell (Section 7).
+
+## 3. Map
+
+| Item | Meaning |
 |---|---|
-| Side open | The side sensor's raw zone is the last one (`NUM_ZONES - 1`, no reflection) |
-| Side wall | The side is not open, whatever distance it reads |
-| Front blocked | Front reading `<= DEAD_END_MAX_CM` (10 cm) |
-| Front clear | Front reading `> DEAD_END_MAX_CM` |
+| Grid | 11 × 11 cells (`MAP_SIDE`), start cell in the middle, so any start in a 6 × 6 maze fits |
+| Directions | N/E/S/W on the robot's own map. "North" is the heading at the start |
+| `mapSides` | Per cell: 4 wall bits + 4 "side seen" bits. A side is shared by two cells, so both are updated |
+| `mapMarks` | Per cell: 2 bits per side = Trémaux marks (0, 1 or 2 walks through that passage) |
+| `mapVisited` | One bit per cell |
+| Unseen sides | The robot cannot see behind it (e.g. the start cell's back). It turns to look when nothing else is left to explore from that cell (rule 3). See Section 6.3 for robots too long to spin in a corridor |
 
-Navigation decisions use `readSensorsStable()` (median of three sweeps per sensor). Checks made while driving use the faster `readSensors()`.
+A side reading is a wall if it is not "nothing seen" and at most `GRID_WALL_MAX_CM` (11 cm), plus however much further the wall is when the robot is known to be off-centre. An open side's next wall is a whole cell further away, beyond the sensor's range. Each side is recorded from its **first** reading only (taken on arrival, near the middle of the cell); later readings, e.g. after reversing in off-centre, only fill in sides not yet seen.
 
-## 3. State
+## 4. Trémaux's algorithm
 
-| Variable | Meaning |
-|---|---|
-| `openingTurnArmed` | Openings may trigger a turn. Cleared when an opening turn is taken, set again when both side walls are seen |
-| `startingPositionPhase` | Codes 5 and 6 are available. Cleared by the first movement decision |
-| `tryingJunctionLeft` | The robot took the left turn at a junction and is trying that branch |
-| `enteredJunctionLeft` | Both side walls have been seen inside that branch |
-| `returningToJunction` | The robot is going straight back through the junction after the branch's dead end |
-| `junctionReached` | During the return, a side opening has been seen |
-| `postTurnAlignPending` | The next pass runs post-turn alignment instead of classifying |
+Every cell is a node and every open side is a passage. When the robot walks through a passage it adds a mark (at most 2). At each cell, in order:
 
-`clearJunctionTrial()` clears `tryingJunctionLeft`, `enteredJunctionLeft`, `returningToJunction` and `junctionReached` together. In this document, that is "clearing the junction memory".
-
-## 4. Main Loop
-
-Each pass of `loop()` runs in this order:
-
-1. If `postTurnAlignPending` is set, clear it, run `alignAfterTurn()` and end the pass. No classification happens and the junction memory and arming do not change.
-2. Take a stable reading and update the straight-corridor timer.
-3. Update the state from the reading:
-   - Both side walls seen: set `openingTurnArmed`. If `tryingJunctionLeft`, set `enteredJunctionLeft`. If `returningToJunction` and `junctionReached`, the return is complete, so clear the junction memory.
-   - Any side open, while `returningToJunction`: set `junctionReached`.
-4. Classify the reading into a scenario code (Section 5).
-5. Show the code on the LEDs, print the debug line, and perform the action (Section 6).
-
-## 5. Decision Priority
-
-The first match wins.
-
-| # | Condition | Result |
+| # | Situation | Action |
 |---|---|---|
-| 1 | Front, left and right all within `DEAD_END_MIN_CM` to `DEAD_END_MAX_CM` | Code 4, dead end |
-| 2 | `returningToJunction` and front clear | Code 1, straight, ignoring side openings |
-| 3 | `returningToJunction` and front blocked | Clear the junction memory, continue down this table |
-| 4 | `tryingJunctionLeft`, `enteredJunctionLeft` and any side open | Clear the junction memory, continue down this table |
-| 5 | `tryingJunctionLeft`, front blocked and both side walls | Code 4, dead end |
-| 6 | `openingTurnArmed` and both sides open, whatever the front reads | Code 10, junction |
-| 7 | Front blocked, both side walls and `straightCorridorMs >= FINISH_CORRIDOR_MIN_CM * FORWARD_MS_PER_CM` | Code 4, the finish. Checked before any rotation, because rotating resets the timer |
-| 8 | `startingPositionPhase` and angled towards the left or right wall | Code 7 or 8, rotate until parallel |
-| 9 | `startingPositionPhase`, close to the left or right wall, and the front sees no reflection | Code 5 or 6, shift towards the middle |
-| 10 | Right open and (`openingTurnArmed` or front blocked) | Code 2, turn right |
-| 11 | Any side open and front clear | Code 1, straight |
-| 12 | Any side open otherwise (right wall and front blocked, so the left is open) | Code 3, turn left |
-| 13 | Angled towards the left or right wall | Code 7 or 8, rotate until parallel |
-| 14 | Front blocked and both side walls | Code 4, dead end |
-| 15 | Front within `TURN_FRONT_MIN_CM` to `TURN_FRONT_MAX_CM`, near side within `TURN_SIDE_MIN_CM` to `TURN_SIDE_MAX_CM`, far side further | Code 2 or 3 |
-| 16 | Front clear | Code 1, straight |
-| 17 | Anything else | Code 0, stop |
+| 1 | Arrived at an **already visited** cell through a passage walked for the **first** time (a loop has closed) | Go straight back through that passage (it gets its second mark) |
+| 2 | An open passage with **0 marks** | Take it. Preference: straight, right, left, back |
+| 3 | A side never seen (behind the robot) | Turn 90° so it comes in front of a side sensor, no move |
+| 4 | Otherwise | Take the passage with **1 mark**: back the way this cell was first entered |
+| 5 | Every passage has 2 marks | Whole reachable maze explored (Section 6, fallback) |
 
-"Angled" means the near side and the front are within zone 2 and the far side is beyond zone 2.
+Rule 1 is what makes it Trémaux and not plain wall following: a loop is never followed round twice. Rule 4 is the backtracking. A passage is never walked a third time.
 
-## 6. Actions
+The "back the way it came" passage is tracked as `entrySide` and not assumed to be behind the robot, because after reversing out of a dead end the robot faces the way it came.
 
-| Code | Action |
+## 5. Finish recognition
+
+For a dead-end cell (3 walls, 1 gap), `deadEndRun()` counts how many cells along the corridor leading out of it have a wall on **both** sides (the dead end included).
+
+- **Finish**: run ≥ `FINISH_RUN_CELLS` (2), and the end wall is proven to be an inside wall (`FINISH_MUST_BE_INSIDE`).
+- **Inside proof**: the maze is a rectangle, so the end wall is inside as soon as any visited cell lies further in that direction.
+
+The check runs at every cell for the current cell and for every visited dead end. A dead end passed earlier (before the robot had been beyond its end wall) becomes the finish as soon as it can be proven; the robot then drives there by the shortest known route (breadth-first flood fill over sides seen to be open).
+
+**Fallback**: if exploration ends with no proven finish, it drives to the most finish-like dead end. Ranking: run ≥ 2 first, then inside end wall, then longest run.
+
+In the 2026 maze, the bottom dead end 44–54 also has a run of 2, but its end wall is the outer wall and can never be proven inside, so it is never taken as the finish.
+
+## 6. Movement
+
+### 6.1 Position along the heading
+
+`axleAheadMm` / `axleRightMm` are the estimated position of the wheel axle (the spin centre) along and across the heading, in mm from the middle of the current cell. A turn rotates them with the robot; a completed drive resets them (forward: 0 ahead; across: 0, the steering centres it).
+
+The robot geometry decides how it moves. `ROBOT_SPINS_FREELY` is true when the back corners (`AXLE_TO_TAIL_CORNER_MM` = 81 mm for the measured 12 × 8 cm robot, axle 5 cm from the front) stay clear of the walls (half corridor 100 mm, minus `TAIL_GAP_MM`). That is the case for the real robot, so the long-robot settings below are all zero and unused:
+
+| Long robots only | Meaning |
 |---|---|
-| 0 | Stop |
-| 1 | `startingPositionPhase = false`, then one forward step (Section 7) |
-| 2 | Clear the junction memory, take the right opening turn (Section 8) |
-| 3 | Clear the junction memory, take the left opening turn (Section 8) |
-| 4 | Finish check, otherwise a 180-degree turn (Section 9) |
-| 5, 6 | Shift towards the middle with `shiftTowardsMiddle()`, `startingPositionPhase = false` |
-| 7, 8 | `rotateUntilParallel()`. `startingPositionPhase = false` if the front ends up clear |
-| 10 | Clear the junction memory, set `tryingJunctionLeft`, take the left opening turn (Section 8). Clear the memory again if the turn is cancelled |
+| `TURN_SHOVE_MM` | The tail corners hit the wall behind the new heading during a 90° turn and shove the robot forward this far |
+| `REVERSE_STOP_MM` | Reversing into a cell with a wall behind stops this far ahead, so the tail clears that wall in the next turn |
 
-## 7. Forward Step
+### 6.2 Driving one cell (`driveCell`)
 
-`moveForwardCm(CORRIDOR_FORWARD_CM)` drives with `driveCentred()`, steering towards the corridor centre. The step ends at the first of:
+Forward or backward, with corridor steering (Section 6.4). The position is dead reckoned from time (`FORWARD_MS_PER_CM`, `BACKWARD_MS_PER_CM`) and corrected twice:
 
-1. **Time:** `CORRIDOR_FORWARD_CM * FORWARD_MS_PER_CM` has passed.
-2. **Wall:** the front reads blocked. The robot stops.
+- **Post edges.** Between every two cells stands a 7 cm post. As a side sensor passes it, its reading flips between open and wall. That happens at a known position (`POST_EDGE_MM` either side of the post's middle), so the position is reset there. Only an edge within `POST_EDGE_WINDOW_MM` of where it is expected is believed. With `DEBUG_SENSORS` the size of each correction is printed.
+- **Front wall** (forward only). If the next cell has a wall ahead, the robot stops when the front reads `GRID_FRONT_STOP_CM`, and creeps up to it (at most `FRONT_CREEP_MAX_MM` further) if it was running slow.
 
-Side openings do not end the step.
+If the front stop happens before the robot has crossed into the next cell, the gap was misread: that side is recorded as a wall and the position is unchanged.
 
-## 8. Opening Turn
+### 6.3 Turning
 
-`takeOpeningTurn()` is shared by codes 2, 3 and 10.
+With `ROBOT_SPINS_FREELY` (the real robot): straight = drive; right / left = spin 90° (`TURN_TIME`) and drive; back = spin 180° (`TURN_180_TIME`) and drive. An unseen side behind is looked at by spinning round to face it.
 
-1. If the side being turned towards is open:
-   - **Approach:** `advanceToOpening()` drives straight with no centring until either `OPENING_FORWARD_TIME_MS` has passed or two readings in a row show the front at or below `OPENING_FRONT_STOP_CM`. Then it stops.
-   - Clear `openingTurnArmed`.
-   - **Junction re-check:** if the robot was armed before the approach, take a stable reading while stopped. If both sides are open, this is a T-junction or crossroads, whichever turn was decided: the turn becomes left, `tryingJunctionLeft` is set and the LEDs show code 10.
-2. Turn 90 degrees in place (`TURN_TIME`).
-3. **Entry:** one forward step into the new corridor (Section 7).
-4. Stop and set `postTurnAlignPending`, so the next pass runs `alignAfterTurn()`.
+A robot too long to spin in a 200 mm corridor (e.g. 20 cm with the axle near the front) instead:
 
-The re-check exists because a crooked or off-centre robot can see one side of a junction open before the other. A T-junction or crossroads must always take the left turn.
-
-## 9. Dead End and Finish
-
-The finish is a long dead end.
-
-1. If `straightCorridorMs >= FINISH_CORRIDOR_MIN_CM * FORWARD_MS_PER_CM`, stop for good. The servos are detached.
-2. Otherwise:
-   - `startingPositionPhase = false`.
-   - `returningToJunction = tryingJunctionLeft`, so only a dead end reached with the junction memory still set starts a return.
-   - Clear `tryingJunctionLeft`, `enteredJunctionLeft` and `junctionReached`.
-   - Turn 180 degrees in place (`TURN_180_TIME`). No post-turn alignment follows.
-
-The straight-corridor timer counts only while driving forward with both side walls seen. A side opening, a turn or a rotation resets it.
-
-## 10. Junction Left-First Trial
-
-1. **Junction:** both sides are open while armed, at the decision or at the re-check after the approach (Section 8). Turn left and set `tryingJunctionLeft`.
-2. **Entering the branch:** openings seen before both side walls appear belong to the junction, so they are ignored.
-3. **Inside the branch**, once both side walls have been seen:
-   - A side opening means this is not a simple short dead end. The junction memory is cleared and normal right-hand priority applies.
-   - A wall ahead with both side walls is the branch's dead end (Section 9).
-   - Any code 2 or code 3 turn also clears the junction memory.
-4. **Return:** after the 180, drive straight and ignore side openings.
-5. **The return ends** when either:
-   - a side opening has been seen and both side walls are then seen again, or
-   - the front is blocked.
-
-   The junction memory is cleared and normal decisions apply.
-
-## 11. Expected Behaviour
-
-| Scenario | Expected action |
+| Move | How |
 |---|---|
-| Right open, armed | Timed approach, turn right |
-| Right open at the decision, armed, both sides open after the approach | Turn left, start the trial |
-| Right open, disarmed, front clear | Straight |
-| Right open, disarmed, front blocked | Timed approach, turn right |
-| Left open only, front clear | Straight |
-| Left open only, front blocked, right still a wall after the approach | Timed approach, turn left, no trial |
-| Left open only, front blocked, both sides open after the approach | Timed approach, turn left, start the trial |
-| Both sides open, armed | Timed approach, turn left, start the trial |
-| Dead end after a long straight corridor | Stop for good |
-| Other dead end, no junction memory | Turn 180, normal navigation |
-| Dead end in the junction's left branch, memory still set | Turn 180, return straight through the junction |
-| Opening inside the left branch | Forget the junction, normal navigation |
-| Normal turn after a junction's left turn | Forget the junction, normal navigation |
-| During a return, side opening | Ignored, straight |
-| During a return, walls on both sides after the junction | Return complete, normal navigation |
-| During a return, front blocked | Return ends, normal navigation |
+| Back, into a visited cell | **Reverse** one cell, keeping the heading |
+| Back, into a new cell, from a junction (3+ open sides) | Spin 180° (there is room) and drive |
+| Back, into a new cell, otherwise | Reverse; its far side stays unseen until a 90° look (rule 3) |
+| Sideways out of a corner (walls behind and opposite the new direction), into a visited cell | Spin the **other** way to face away, then reverse. Spinning towards the new direction would jam the tail in the corner |
+| An unseen side in a corridor | Taken as a wall (`settleUnseenSides()`), as it cannot turn there to look |
 
-## 12. Implementation Requirements
+### 6.4 Steering
 
-- Preserve the existing motor speeds, turn durations, calibration values and sensor thresholds.
-- Re-read the sensors after every completed turn. Do not decide from readings taken before a turn.
-- Each turn completes before the next decision is made.
-- The debug line prints the side readings, the open flags, the straight-corridor time and the scenario code. The simulator parses this format, so changes to it must match `simulator/src/core/serialParsers.ts`.
+Between two side walls: steer when their readings differ by at least `STEER_TOLERANCE_CM` (one zone). Beside one wall: keep it at `SIDE_WALL_CENTRE_CM`. The steering slows one wheel by `STEER_AMOUNT`. Reversing uses the mirrored correction (turning the heading right moves the robot left when going backwards).
+
+## 7. LED codes
+
+| Code | Meaning |
+|---|---|
+| 1 | Straight on |
+| 2 | Turn right |
+| 3 | Turn left |
+| 4 | Back (reverse or turn round) |
+| 7 | Finish reached |
+| 10 | Straight on through a junction (3+ open sides) |
+| 0 | Stopped: gave up (move limit, or no route) |
+
+## 8. Debug output
+
+With `DEBUG_SENSORS`, each cell prints two lines:
+
+```
+5 17 5 | open L/R 0/0 -> code 1
+cell (0,-1) facing N | walls L F R 1 0 0 | marks NESW 0010 -> go E
+```
+
+The first is the reading in the format the simulator parses as a decision (`simulator/src/core/serialParsers.ts`). The second is the map position, the walls of this cell, its Trémaux marks and the decision. At the end the explored map is printed (`@` robot, `o` visited, `?` side never seen).
+
+## 9. Calibration checklist (real robot)
+
+| Constant | How |
+|---|---|
+| `TURN_TIME`, `FORWARD_MS_PER_CM`, `BACKWARD_MS_PER_CM` | Recalibrate with the batteries you will run on: timed turns are the largest error source |
+| `CELL_SIZE_MM`, `HALF_CORRIDOR_MM` | Measure the maze: post centre to post centre, and half a tile |
+| `AXLE_TO_TAIL_MM`, `AXLE_TO_TAIL_CORNER_MM` | Measured: 70 and 81 mm (12 × 8 cm robot, axle 5 cm from the front). These decide `ROBOT_SPINS_FREELY` |
+| `SIDE_SENSOR_AHEAD_MM` | Axle to the side sensors |
+| `POST_EDGE_MM` | Creep past a post on an open side and note where the reading changes. Large post corrections all one way in the debug output mean this is off |
+| `SIDE_WALL_CENTRE_CM`, `GRID_FRONT_STOP_CM` | Side and front readings with the robot in the middle of a cell |
+| `STEER_AMOUNT` | Raise it if the robot drifts into walls without correcting; lower it if it weaves |
+
+## 10. Simulator results (`12-advanced-2026.maze.json`)
+
+With the measured robot (Robot tab: length 12 cm, width 8 cm, front edge to axle 5 cm):
+
+- Standard start: reaches the finish (cell 23) after 34 moves, ~117 s simulated, with no collisions, ignoring the bottom decoy.
+- Start anywhere: every cell at every heading (136 starts, axle at the cell centre) solves it.
+- Robustness plan (battery 92–103 %, wheel mismatch ±3 %, noise): 13 of 20 reach the finish. The failures are all with batteries at 96 % or below: timed turns come out short (a 180° at a dead end doubles the error). Recalibrate `TURN_TIME` on the batteries you run with.
+- With the old simulator default robot (20 × 11 cm, axle 4.5 cm from the front), set `AXLE_TO_TAIL_MM` = 155 and `AXLE_TO_TAIL_CORNER_MM` = 164 to use the long-robot behaviour. It cannot spin in a 20 cm corridor without clipping walls.
