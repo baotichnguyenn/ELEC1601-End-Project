@@ -59,13 +59,13 @@ const int LEFT_BACKWARD  = 1430;
 const int RIGHT_BACKWARD = 1558;
 
 // Centring: how much to slow one wheel to steer back to the middle of the corridor
-const int STEER_AMOUNT = 15;
+const int STEER_AMOUNT = 12;
 
 // 90 degree turns (both wheels driven the same way to spin in place)
 const int LEFT_TURN_SPEED  = 1400; // anticlockwise
 const int RIGHT_TURN_SPEED = 1600; // clockwise
 const int TURN_TIME        = 580;
-const unsigned long OPENING_FORWARD_TIME_MS = 600;
+const unsigned long OPENING_FORWARD_TIME_MS = 550;
 // Allow the axle to approach the corner before spinning. This is deliberately
 // separate from the more conservative normal-forward threshold (10 cm).
 const int OPENING_FRONT_STOP_CM = 6;
@@ -203,9 +203,9 @@ const int CORRIDOR_FORWARD_CM = 10; // Code 1: move 5 cm
 // Maze finish: the finish is always a long dead end. A dead end (code 4) reached after
 // driving at least this far straight between two side walls stops the robot for good.
 // Measured as forward-driving time and converted with FORWARD_MS_PER_CM. Set it to about
-// 1.5 tiles for a 2-tile finish: longer than any ordinary dead-end corridor, shorter than
-// the finish corridor (see callibration.md).
-const int FINISH_CORRIDOR_MIN_CM = 40;
+// 1.3 tiles for a 2-tile finish: longer than any ordinary dead-end corridor, shorter than
+// the finish corridor (see callibration.md), with room for arrivals that read a little short.
+const int FINISH_CORRIDOR_MIN_CM = 35;
 const float NUDGE_MIN_FORWARD_CM = 1.5;
 const float NUDGE_MAX_FORWARD_CM = 4.0;
 
@@ -505,6 +505,12 @@ int classifyScenario(const Readings &r)
   if (openingTurnArmed && r.leftOpen && r.rightOpen)
     return SCENARIO_JUNCTION_10;
 
+  // The finish: a wall ahead and walls both sides at the end of a long straight corridor.
+  // Checked before 7/8: arriving off-centre looks angled, and rotating resets the timer.
+  if (r.cmMiddle <= DEAD_END_MAX_CM && !r.leftOpen && !r.rightOpen &&
+      straightCorridorMs >= (unsigned long)FINISH_CORRIDOR_MIN_CM * FORWARD_MS_PER_CM)
+    return SCENARIO_DEAD_END_4;
+
   // Starting positions: 7/8 take priority over 5/6. 5/6 need an open front.
   if (startingPositionPhase)
   {
@@ -701,15 +707,30 @@ void enterCorridorAfterTurn()
 }
 
 // Shared by scenarios 2, 3 and 10 so the approach/turn/entry behaviour stays
-// identical. A stop during the approach cancels the pending turn.
+// identical. A stop during the approach cancels the pending turn. Arriving crooked or
+// off-centre, one side of a crossroads or T can open before the other, so the direction is
+// checked again after the approach: both sides open always means left and the junction trial.
 bool takeOpeningTurn(bool right, const Readings &r)
 {
   startingPositionPhase = false;
   if (right ? r.rightOpen : r.leftOpen)
   {
+    bool wasArmed = openingTurnArmed;
     if (!advanceToOpening())
       return false;
     openingTurnArmed = false;
+    if (wasArmed)
+    {
+      Readings atOpening = readSensorsStable();
+      if (atOpening.leftOpen && atOpening.rightOpen)
+      {
+        right = false;
+        tryingJunctionLeft = true;
+        showCode(SCENARIO_JUNCTION_10);
+        if (DEBUG_SENSORS)
+          Serial.println(F("both sides open after approach: junction, turning left"));
+      }
+    }
   }
   if (right)
     turnRight90();

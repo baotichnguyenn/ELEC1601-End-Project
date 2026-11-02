@@ -1,212 +1,164 @@
-# Maze Robot Navigation Algorithm — Right-Hand Priority with Left-Turn Recovery
+# Maze Robot Navigation Algorithm — Right-Hand Priority with Junction Left-First Trial
+
+This document describes the logic implemented in `advanced.ino`. If the two disagree, `advanced.ino` is the reference.
 
 ## 1. Objective
 
-Implement a deterministic maze-navigation algorithm using three directional distance sensors:
+The robot navigates a maze using three IR distance sensors (`FRONT`, `LEFT`, `RIGHT`).
 
-- `FRONT`: Detects walls directly ahead.
-- `LEFT`: Detects walls on the left.
-- `RIGHT`: Detects walls on the right.
+It follows a **right-hand priority strategy**. At a T-junction or crossroads it tries the left branch first. If that branch is a simple short dead end, the robot turns around and goes straight back through the junction.
 
-The robot follows a **right-hand priority strategy**, with a special left-turn exploration rule at T-junctions and four-way intersections.
+## 2. Sensor Definitions
 
-The algorithm must distinguish between normal navigation and post-dead-end recovery. In particular, after executing a 180-degree turn at a dead end following a special left turn, the robot must temporarily follow a straight-first navigation strategy rather than immediately returning to right-hand priority.
-
-
-## 3. Navigation States
-
-The algorithm must maintain two navigation modes:
-
-### MODE A — NORMAL_NAVIGATION
-
-The default navigation mode. The robot follows right-hand priority, except when encountering a T-junction or four-way intersection.
-
-### MODE B — STRAIGHT_RECOVERY
-
-Activated immediately after the robot performs a 180-degree turn at a dead end that was encountered following a special left turn.
-
-In this mode:
-- Ignore left and right openings.
-- Continue straight whenever the front is clear.
-- If the front is blocked, transition back to `NORMAL_NAVIGATION` and apply right-hand priority.
-
-This mode prevents the robot from immediately reversing its intended exploration direction after recovering from a dead end.
-
-## 4. MODE A — Normal Navigation
-
-Evaluate sensor readings in the following priority order.
-
-### Rule 1: Right-Hand Priority
-
-If the right side is open:
-
-- Turn right.
-- Continue forward.
-
-This is the default behaviour.
-
-### Rule 2: T-Junction — Special Left Turn
-
-A T-junction is defined as:
-
-```text
-FRONT = BLOCKED
-LEFT  = OPEN
-RIGHT = OPEN
-```
-
-When this condition occurs:
-
-1. Execute a 90-degree left turn.
-2. Set `special_left_turn = true`.
-3. Continue navigation in `NORMAL_NAVIGATION`.
-
-The next junction or dead end encountered after this turn must be evaluated according to the special-turn recovery rules in Section 6.
-
-### Rule 3: Four-Way Intersection — Special Left Turn
-
-A four-way intersection is defined as:
-
-```text
-FRONT = OPEN
-LEFT  = OPEN
-RIGHT = OPEN
-```
-
-When this condition occurs:
-
-1. Execute a 90-degree left turn.
-2. Set `special_left_turn = true`.
-3. Continue navigation in `NORMAL_NAVIGATION`.
-
-### Rule 4: Straight
-
-If the front is open and the right side is blocked, continue straight.
-
-### Rule 5: Left Turn
-
-If the front and right sides are blocked, but the left side is open:
-
-- Execute a 90-degree left turn.
-- Continue forward.
-
-### Rule 6: Dead End
-
-If all three directions are blocked:
-
-- Execute a 180-degree turn.
-- Continue forward.
-
-If `special_left_turn = true`, activate `STRAIGHT_RECOVERY` after completing the 180-degree turn.
-
-Otherwise, return to normal navigation.
-
-## 5. MODE B — Straight Recovery
-
-This mode is specifically designed for the dead-end scenario following a special left turn.
-
-Evaluate only the front sensor.
-
-### Rule 1: Front Is Open
-
-```text
-FRONT = OPEN
-```
-
-- Continue straight.
-- Ignore all left and right openings.
-- Remain in `STRAIGHT_RECOVERY`.
-
-### Rule 2: Front Is Blocked
-
-```text
-FRONT = BLOCKED
-```
-
-- Exit `STRAIGHT_RECOVERY`.
-- Set `special_left_turn = false`.
-- Transition to `NORMAL_NAVIGATION`.
-- Re-evaluate all three sensors.
-- Apply the standard right-hand priority rules.
-
-Do not execute another 180-degree turn simply because the robot is in recovery mode.
-
-## 6. Special Left-Turn Tracking
-
-Maintain a Boolean variable:
-
-```cpp
-bool special_left_turn = false;
-```
-
-Its purpose is to track whether the robot has executed a special left turn at a T-junction or four-way intersection.
-
-State transitions:
-
-| Event | `special_left_turn` |
+| Term | Meaning |
 |---|---|
-| Special left turn at T-junction | `true` |
-| Special left turn at four-way intersection | `true` |
-| Normal right turn | Unchanged |
-| Normal straight movement | Unchanged |
-| Normal left turn | Unchanged |
-| Dead end after special left turn | Remains true until 180 completes |
-| 180-degree turn completes | Set to false; activate recovery mode |
-| Recovery mode encounters blocked front | Remains false |
+| Side open | The side sensor's raw zone is the last one (`NUM_ZONES - 1`, no reflection) |
+| Side wall | The side is not open, whatever distance it reads |
+| Front blocked | Front reading `<= DEAD_END_MAX_CM` (10 cm) |
+| Front clear | Front reading `> DEAD_END_MAX_CM` |
 
-The special-turn flag must persist across ordinary movements until the next dead end is encountered.
+Navigation decisions use `readSensorsStable()` (median of three sweeps per sensor). Checks made while driving use the faster `readSensors()`.
 
-## 7. Decision Priority Summary
+## 3. State
 
-### Normal Navigation
+| Variable | Meaning |
+|---|---|
+| `openingTurnArmed` | Openings may trigger a turn. Cleared when an opening turn is taken, set again when both side walls are seen |
+| `startingPositionPhase` | Codes 5 and 6 are available. Cleared by the first movement decision |
+| `tryingJunctionLeft` | The robot took the left turn at a junction and is trying that branch |
+| `enteredJunctionLeft` | Both side walls have been seen inside that branch |
+| `returningToJunction` | The robot is going straight back through the junction after the branch's dead end |
+| `junctionReached` | During the return, a side opening has been seen |
+| `postTurnAlignPending` | The next pass runs post-turn alignment instead of classifying |
 
-Evaluate conditions in this order:
+`clearJunctionTrial()` clears `tryingJunctionLeft`, `enteredJunctionLeft`, `returningToJunction` and `junctionReached` together. In this document, that is "clearing the junction memory".
 
-1. If the front, left and right are all open: special left turn.
-2. If the front is blocked and both sides are open: special left turn (T-junction).
-3. If the right is open: turn right.
-4. If the front is open: drive straight.
-5. If only the left is open: turn left.
-6. If all three directions are blocked: perform a 180-degree turn.
+## 4. Main Loop
 
-Note: The dead-end condition must be evaluated before the general left-turn condition. The implementation must also explicitly handle the T-junction before applying right-hand priority.
+Each pass of `loop()` runs in this order:
 
-### Straight Recovery
+1. If `postTurnAlignPending` is set, clear it, run `alignAfterTurn()` and end the pass. No classification happens and the junction memory and arming do not change.
+2. Take a stable reading and update the straight-corridor timer.
+3. Update the state from the reading:
+   - Both side walls seen: set `openingTurnArmed`. If `tryingJunctionLeft`, set `enteredJunctionLeft`. If `returningToJunction` and `junctionReached`, the return is complete, so clear the junction memory.
+   - Any side open, while `returningToJunction`: set `junctionReached`.
+4. Classify the reading into a scenario code (Section 5).
+5. Show the code on the LEDs, print the debug line, and perform the action (Section 6).
 
-1. If the front is open: drive straight and ignore both side sensors.
-2. If the front is blocked: return to normal navigation and re-evaluate all sensors.
+## 5. Decision Priority
 
-## 8. Implementation Requirements
+The first match wins.
 
-- Implement the algorithm as a deterministic state machine.
-- Keep sensor acquisition separate from navigation decision logic.
-- Keep motor control and turning routines separate from sensor interpretation.
-- Re-evaluate sensor readings after every completed turn.
-- Do not make navigation decisions using stale sensor readings from before a turn.
-- Preserve existing motor speed, turning duration, calibration, and sensor threshold configurations.
-- Avoid blocking or overlapping motor commands.
-- Ensure each turn completes before the next navigation decision is made.
-- Add serial debugging output indicating the current navigation mode, sensor states, and selected action.
+| # | Condition | Result |
+|---|---|---|
+| 1 | Front, left and right all within `DEAD_END_MIN_CM` to `DEAD_END_MAX_CM` | Code 4, dead end |
+| 2 | `returningToJunction` and front clear | Code 1, straight, ignoring side openings |
+| 3 | `returningToJunction` and front blocked | Clear the junction memory, continue down this table |
+| 4 | `tryingJunctionLeft`, `enteredJunctionLeft` and any side open | Clear the junction memory, continue down this table |
+| 5 | `tryingJunctionLeft`, front blocked and both side walls | Code 4, dead end |
+| 6 | `openingTurnArmed` and both sides open, whatever the front reads | Code 10, junction |
+| 7 | Front blocked, both side walls and `straightCorridorMs >= FINISH_CORRIDOR_MIN_CM * FORWARD_MS_PER_CM` | Code 4, the finish. Checked before any rotation, because rotating resets the timer |
+| 8 | `startingPositionPhase` and angled towards the left or right wall | Code 7 or 8, rotate until parallel |
+| 9 | `startingPositionPhase`, close to the left or right wall, and the front sees no reflection | Code 5 or 6, shift towards the middle |
+| 10 | Right open and (`openingTurnArmed` or front blocked) | Code 2, turn right |
+| 11 | Any side open and front clear | Code 1, straight |
+| 12 | Any side open otherwise (right wall and front blocked, so the left is open) | Code 3, turn left |
+| 13 | Angled towards the left or right wall | Code 7 or 8, rotate until parallel |
+| 14 | Front blocked and both side walls | Code 4, dead end |
+| 15 | Front within `TURN_FRONT_MIN_CM` to `TURN_FRONT_MAX_CM`, near side within `TURN_SIDE_MIN_CM` to `TURN_SIDE_MAX_CM`, far side further | Code 2 or 3 |
+| 16 | Front clear | Code 1, straight |
+| 17 | Anything else | Code 0, stop |
 
-## 9. Expected Behaviour
+"Angled" means the near side and the front are within zone 2 and the far side is beyond zone 2.
+
+## 6. Actions
+
+| Code | Action |
+|---|---|
+| 0 | Stop |
+| 1 | `startingPositionPhase = false`, then one forward step (Section 7) |
+| 2 | Clear the junction memory, take the right opening turn (Section 8) |
+| 3 | Clear the junction memory, take the left opening turn (Section 8) |
+| 4 | Finish check, otherwise a 180-degree turn (Section 9) |
+| 5, 6 | Shift towards the middle with `shiftTowardsMiddle()`, `startingPositionPhase = false` |
+| 7, 8 | `rotateUntilParallel()`. `startingPositionPhase = false` if the front ends up clear |
+| 10 | Clear the junction memory, set `tryingJunctionLeft`, take the left opening turn (Section 8). Clear the memory again if the turn is cancelled |
+
+## 7. Forward Step
+
+`moveForwardCm(CORRIDOR_FORWARD_CM)` drives with `driveCentred()`, steering towards the corridor centre. The step ends at the first of:
+
+1. **Time:** `CORRIDOR_FORWARD_CM * FORWARD_MS_PER_CM` has passed.
+2. **Wall:** the front reads blocked. The robot stops.
+
+Side openings do not end the step.
+
+## 8. Opening Turn
+
+`takeOpeningTurn()` is shared by codes 2, 3 and 10.
+
+1. If the side being turned towards is open:
+   - **Approach:** `advanceToOpening()` drives straight with no centring until either `OPENING_FORWARD_TIME_MS` has passed or two readings in a row show the front at or below `OPENING_FRONT_STOP_CM`. Then it stops.
+   - Clear `openingTurnArmed`.
+   - **Junction re-check:** if the robot was armed before the approach, take a stable reading while stopped. If both sides are open, this is a T-junction or crossroads, whichever turn was decided: the turn becomes left, `tryingJunctionLeft` is set and the LEDs show code 10.
+2. Turn 90 degrees in place (`TURN_TIME`).
+3. **Entry:** one forward step into the new corridor (Section 7).
+4. Stop and set `postTurnAlignPending`, so the next pass runs `alignAfterTurn()`.
+
+The re-check exists because a crooked or off-centre robot can see one side of a junction open before the other. A T-junction or crossroads must always take the left turn.
+
+## 9. Dead End and Finish
+
+The finish is a long dead end.
+
+1. If `straightCorridorMs >= FINISH_CORRIDOR_MIN_CM * FORWARD_MS_PER_CM`, stop for good. The servos are detached.
+2. Otherwise:
+   - `startingPositionPhase = false`.
+   - `returningToJunction = tryingJunctionLeft`, so only a dead end reached with the junction memory still set starts a return.
+   - Clear `tryingJunctionLeft`, `enteredJunctionLeft` and `junctionReached`.
+   - Turn 180 degrees in place (`TURN_180_TIME`). No post-turn alignment follows.
+
+The straight-corridor timer counts only while driving forward with both side walls seen. A side opening, a turn or a rotation resets it.
+
+## 10. Junction Left-First Trial
+
+1. **Junction:** both sides are open while armed, at the decision or at the re-check after the approach (Section 8). Turn left and set `tryingJunctionLeft`.
+2. **Entering the branch:** openings seen before both side walls appear belong to the junction, so they are ignored.
+3. **Inside the branch**, once both side walls have been seen:
+   - A side opening means this is not a simple short dead end. The junction memory is cleared and normal right-hand priority applies.
+   - A wall ahead with both side walls is the branch's dead end (Section 9).
+   - Any code 2 or code 3 turn also clears the junction memory.
+4. **Return:** after the 180, drive straight and ignore side openings.
+5. **The return ends** when either:
+   - a side opening has been seen and both side walls are then seen again, or
+   - the front is blocked.
+
+   The junction memory is cleared and normal decisions apply.
+
+## 11. Expected Behaviour
 
 | Scenario | Expected action |
 |---|---|
-| Right open | Turn right |
-| Front open, right blocked | Drive straight |
-| Only left open | Turn left |
-| All directions blocked | Turn 180 degrees |
-| T-junction | Special left turn |
-| Four-way intersection | Special left turn |
-| Special left turn followed by normal corridor | Continue normal navigation |
-| Special left turn followed by dead end | Turn 180 degrees, activate recovery |
-| Recovery mode, front open | Drive straight regardless of side openings |
-| Recovery mode, front blocked | Return to normal right-hand priority |
+| Right open, armed | Timed approach, turn right |
+| Right open at the decision, armed, both sides open after the approach | Turn left, start the trial |
+| Right open, disarmed, front clear | Straight |
+| Right open, disarmed, front blocked | Timed approach, turn right |
+| Left open only, front clear | Straight |
+| Left open only, front blocked, right still a wall after the approach | Timed approach, turn left, no trial |
+| Left open only, front blocked, both sides open after the approach | Timed approach, turn left, start the trial |
+| Both sides open, armed | Timed approach, turn left, start the trial |
+| Dead end after a long straight corridor | Stop for good |
+| Other dead end, no junction memory | Turn 180, normal navigation |
+| Dead end in the junction's left branch, memory still set | Turn 180, return straight through the junction |
+| Opening inside the left branch | Forget the junction, normal navigation |
+| Normal turn after a junction's left turn | Forget the junction, normal navigation |
+| During a return, side opening | Ignored, straight |
+| During a return, walls on both sides after the junction | Return complete, normal navigation |
+| During a return, front blocked | Return ends, normal navigation |
 
-## 10. Important Design Constraint
+## 12. Implementation Requirements
 
-The `STRAIGHT_RECOVERY` mode must only be activated when a dead end is encountered after a special left turn at a T-junction or four-way intersection.
-
-It must not activate after an ordinary dead end.
-
-The primary objective is to preserve the robot's intended exploration direction after a special left-turn decision, preventing it from immediately selecting another side opening after reversing at a dead end.
+- Preserve the existing motor speeds, turn durations, calibration values and sensor thresholds.
+- Re-read the sensors after every completed turn. Do not decide from readings taken before a turn.
+- Each turn completes before the next decision is made.
+- The debug line prints the side readings, the open flags, the straight-corridor time and the scenario code. The simulator parses this format, so changes to it must match `simulator/src/core/serialParsers.ts`.
