@@ -199,7 +199,7 @@ const char *const CENTRE_RESULT_NAMES[] = { "NOT_APPLICABLE", "UNVERIFIED", "OFF
 
 const int FORWARD_MS_PER_CM   = 75;
 const int BACKWARD_MS_PER_CM  = 75;
-const int CORRIDOR_FORWARD_CM = 10; // Code 1: move 5 cm
+const int CORRIDOR_FORWARD_CM = 6; // Code 1: move 5 cm
 // Maze finish: the finish is always a long dead end. A dead end (code 4) reached after
 // driving at least this far straight between two side walls stops the robot for good.
 // Measured as forward-driving time and converted with FORWARD_MS_PER_CM. Set it to about
